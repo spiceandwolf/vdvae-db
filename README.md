@@ -101,3 +101,4 @@ python train.py --hps cifar10 --restore_ema_path cifar10-seed2-iter-650000-model
 python train.py --hps cifar10 --restore_ema_path cifar10-seed3-iter-1050000-model-ema.th --test_eval
 # seeds 0, 1, 2, 3 should give 2.879, 2.842, 2.898, 2.864 bits per dim, for an average of 2.87 bits per dim.
 ```
+https://zhuanlan.zhihu.com/p/48254913

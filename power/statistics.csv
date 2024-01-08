@@ -1,0 +1,8 @@
+name,min,max,cardinality,num_unique_values
+Global_active_power,0.076,11.122,2049280,4186
+Global_reactive_power,0.0,1.39,2049280,532
+Voltage,223.2,254.15,2049280,2837
+Global_intensity,0.2,48.4,2049280,221
+Sub_metering_1,0.0,88.0,2049280,88
+Sub_metering_2,0.0,80.0,2049280,81
+Sub_metering_3,0.0,31.0,2049280,32

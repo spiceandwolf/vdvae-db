@@ -1,6 +1,7 @@
 import numpy as np
 import pickle
 import os
+from sklearn.preprocessing import MinMaxScaler
 import torch
 from torch.utils.data import TensorDataset
 from torchvision.datasets import ImageFolder
@@ -41,6 +42,12 @@ def set_up_data(H):
         (trX, _), (vaX, _), (teX, _) = cifar10(H.data_root, one_hot=False)
         H.image_size = 32
         H.image_channels = 3
+        shift = -120.63838
+        scale = 1. / 64.16736
+    elif H.dataset == 'power':
+        trX, vaX, teX = power(H.data_root)
+        H.image_size = 7
+        H.image_channels = 1
         shift = -120.63838
         scale = 1. / 64.16736
     else:
@@ -144,7 +151,7 @@ def ffhq256(data_root):
 
 def cifar10(data_root, one_hot=True):
     tr_data = [unpickle_cifar10(os.path.join(data_root, 'cifar-10-batches-py/', 'data_batch_%d' % i)) for i in range(1, 6)]
-    trX = np.vstack(data['data'] for data in tr_data)
+    trX = np.vstack([data['data'] for data in tr_data])
     trY = np.asarray(flatten([data['labels'] for data in tr_data]))
     te_data = unpickle_cifar10(os.path.join(data_root, 'cifar-10-batches-py/', 'test_batch'))
     teX = np.asarray(te_data['data'])
@@ -161,3 +168,17 @@ def cifar10(data_root, one_hot=True):
         vaY = np.reshape(vaY, [-1, 1])
         teY = np.reshape(teY, [-1, 1])
     return (trX, trY), (vaX, vaY), (teX, teY)
+
+
+def power(data_root):
+    trX = np.genfromtxt(os.path.join(data_root, 'household_power_consumption.txt'), skip_header=0, delimiter=';', usecols=[2,3,4,5,6,7,8], missing_values={' ', '?'}, filling_values=np.nan)
+    trX = trX[~np.isnan(trX).any(axis=1)]
+    scaler = MinMaxScaler()
+    trX = scaler.fit_transform(trX)
+    np.random.seed(42)
+    tr_va_split_indices = np.random.permutation(trX.shape[0])
+    split_index = int(trX.shape[0] * 0.1)
+    test = trX[tr_va_split_indices[:split_index]].reshape(-1, 1, 7)
+    valid = trX[tr_va_split_indices[split_index:2*split_index]].reshape(-1, 1, 7)
+    train = trX[tr_va_split_indices[2*split_index:]].reshape(-1, 1, 7)
+    return train, valid, test
