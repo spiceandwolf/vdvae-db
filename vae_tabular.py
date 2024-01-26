@@ -9,6 +9,7 @@ import itertools
 
 
 class Block(nn.Module):
+    
     def __init__(self, in_width, middle_width, out_width, down_rate=None, residual=False, use_3x1=True, zero_last=False):
         super().__init__()
         self.down_rate = down_rate
@@ -25,7 +26,7 @@ class Block(nn.Module):
         xhat = self.c4(F.gelu(xhat))
         out = x + xhat if self.residual else xhat
         if self.down_rate is not None:
-            out = F.avg_pool2d(out, kernel_size=self.down_rate, stride=self.down_rate)
+            out = F.avg_pool1d(out, kernel_size=self.down_rate, stride=self.down_rate)
         return out
     
     
@@ -63,7 +64,7 @@ def parse_layer_string(s):
     return layers
 
 
-def pad_channels(t, width):
+def pad_channels(t, width: int):
     d1, d2, d3 = t.shape
     empty = torch.zeros(d1, width, d3, device=t.device)
     empty[:, :d2, :] = t
@@ -97,15 +98,17 @@ class Encoder(HModule):
         self.enc_blocks = nn.ModuleList(enc_blocks)
 
     def forward(self, x):
-        
+    
         x = self.in_conv(x)
         activations = {}
         activations[x.shape[2]] = x
+        
         for block in self.enc_blocks:
             x = block(x)
             res = x.shape[2]
             x = x if x.shape[1] == self.widths[res] else pad_channels(x, self.widths[res])
             activations[res] = x
+        
         return activations
 
 
@@ -135,12 +138,12 @@ class DecBlock(nn.Module):
     def sample(self, x, acts):
         qm, qv = self.enc(torch.cat([x, acts], dim=1)).chunk(2, dim=1) # Calculate q distribution parameters. Chunk into 2 (first z_dim is mean, second is variance)
         feats = self.prior(x) # generated features
-        pm, pv, xpp = feats[:, :self.zdim, ...], feats[:, self.zdim:self.zdim * 2, ...], feats[:, self.zdim * 2:, ...] # xpp is a tensor used to modify x in the next step.
+        pm, pv = feats[:, :self.zdim, ...], feats[:, self.zdim:self.zdim * 2, ...] # pm and pv are the mean and standard deviation of the Gaussian distribution of the latent code.
+        xpp = feats[:, self.zdim * 2:, ...] # xpp is a tensor used to modify x in the next step.                                                                                              
         x = x + xpp
         z = draw_gaussian_diag_samples(qm, qv)
-        kl = self.gaussian_kl(qm, pm, qv, pv)
-        # kl = gaussian_analytical_kl(qm, pm, qv, pv)
-        return z, x, kl, pm, pv
+        kl = gaussian_analytical_kl(qm, pm, qv, pv)
+        return z, x, kl
 
     def sample_uncond(self, x, t=None, lvs=None):
         n, c, h, w = x.shape
@@ -173,13 +176,13 @@ class DecBlock(nn.Module):
         if self.mixin is not None:
             # x = x + F.interpolate(xs[self.mixin][:, :x.shape[1], ...], scale_factor=self.base // self.mixin)
             x = x + F.interpolate(xs[self.mixin][:, :x.shape[1], ...], scale_factor=self.base / self.mixin)
-        z, x, kl, pm, pv = self.sample(x, acts)
+        z, x, kl = self.sample(x, acts)
         x = x + self.z_fn(z)
         x = self.resnet(x)
         xs[self.base] = x # xs means x_sample :)
         if get_latents:
-            return xs, dict(z=z.detach(), kl=kl, pm=pm, pv=pv)
-        return xs, dict(kl=kl, pm=pm, pv=pv)
+            return xs, dict(z=z.detach(), kl=kl)
+        return xs, dict(kl=kl)
 
     def forward_uncond(self, xs, t=None, lvs=None):
         try:
@@ -194,9 +197,6 @@ class DecBlock(nn.Module):
         x = self.resnet(x)
         xs[self.base] = x
         return xs
-
-    def gaussian_kl(self, mu1, mu2, logsigma1, logsigma2):
-        return -0.5 + logsigma2.exp() - logsigma1.exp() + 0.5 * (logsigma1.exp() ** 2 + (mu1 - mu2) ** 2) / (logsigma2.exp() ** 2)
 
 
 class Decoder(HModule):
@@ -222,7 +222,7 @@ class Decoder(HModule):
         
         self.gain = nn.Parameter(torch.ones(1, H.width, 1))
         self.bias = nn.Parameter(torch.zeros(1, H.width, 1))
-        self.final_fn = lambda x: x * self.gain + self.bias
+        self.final_fn = lambda x: x * self.gain + self.bias # mu and var?
 
     def forward(self, activations, get_latents=False):
         stats = []
@@ -261,28 +261,23 @@ class VAE(HModule):
         self.encoder = Encoder(self.H)
         self.decoder = Decoder(self.H)
 
-    def forward(self, x, x_arget):
+    def forward(self, x, x_target):
         # x : [batch_size, channels, length] or [batch_size, channels, height, width]
-        
         activations = self.encoder.forward(x)
-        # print(activations.keys())
         px_z, stats = self.decoder.forward(activations)
         
-        pm = stats[-1]['pm']
-        pv = stats[-1]['pv']
+        # rl = self.decoder.out_net.nll(px_z, x_target, self.decoder.gain).mean(dim=(1,2))
+        rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
         
-        # rl = self.decoder.out_net.gaussian_nll(x, pm, pv).mean(dim=(1,2))
-        # print(rl.shape)
-        rl = self.decoder.out_net.nll(px_z, x).mean(dim=(1,2))
-        print(rl.shape)
         rpp = torch.zeros_like(rl) # rate_per_pixel
         ndims = np.prod(x.shape[1:])
         
         for statdict in stats:
+            print(statdict['kl'].shape)
             rpp += statdict['kl'].sum(dim=(1,2))
-        rpp /= ndims
-        elbo = (rl + rpp)
-        return elbo, dict(elbo=elbo.mean(), distortion=rl.mean(), rate=rpp.mean()) # distortion is the reconstruction loss, rate is the KL loss
+        # rpp /= ndims # （1, 1, width）is a mate
+        elbo = (rl + rpp).mean()
+        return dict(elbo=elbo, distortion=rl.mean(), rate=rpp.mean()) # distortion is the reconstruction loss, rate is the KL loss
 
     def forward_get_latents(self, x):
         activations = self.encoder.forward(x)
@@ -296,6 +291,28 @@ class VAE(HModule):
     def forward_samples_set_latents(self, n_batch, latents, t=None):
         px_z = self.decoder.forward_manual_latents(n_batch, latents, t=t)
         return self.decoder.out_net.sample(px_z)
+    
+    def nelbo(self, x):
+        # print(f'x {x} {x.shape}')
+        activations = self.encoder.forward(x)
+        # print(activations.keys())
+        px_z, stats = self.decoder.forward(activations)
+        
+        print(f'y {self.decoder.out_net.forward(px_z)}')
+        # print(f'y {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain)} {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain).shape}')
+        rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
+        # print(rl.shape)
+        
+        rpp = torch.zeros_like(rl) # rate_per_pixel
+        ndims = np.prod(x.shape[1:])
+        
+        for statdict in stats:
+            print(statdict['kl'].shape)
+            rpp += statdict['kl'].sum(dim=(1,2))
+        rpp /= ndims
+        elbo = (rl + rpp)
+        # print(f'rl {rl} rpp {rpp}')
+        return -elbo
 
 class OutPutNet(nn.Module):
     '''
@@ -308,20 +325,26 @@ class OutPutNet(nn.Module):
         self.width = H.width
         self.out_conv = get_3x1(H.width, H.image_channels) # because of the self.in_conv = get_3x1(H.image_channels, H.width) in encoder
 
-    def nll(self, px_z, x):
+    def nll(self, px_z, x, ln_var):
         loss = torch.nn.MSELoss(reduction='none')
-        return loss(x, self.forward(px_z))
+        # re = loss(x, self.forward(px_z)) * 0.5 * torch.exp(-2 * ln_var) + math.log(2 * torch.pi) * 0.5 + ln_var
+        re = loss(x, self.forward(px_z)) * 0.5
+        return re
     
     def gaussian_nll(self, x, mu, ln_var):
         prec = torch.exp(-1 * ln_var)
         x_diff = x - mu
-        x_power = (x_diff * x_diff) * prec * -0.5
-        return (ln_var + math.log(2 * math.pi)) * 0.5 - x_power
+        x_power = (x_diff * x_diff) * prec * 0.5
+        return (ln_var + math.log(2 * torch.pi)) * 0.5 + x_power
 
 
     def forward(self, px_z):
         xhat = self.out_conv(px_z)
         return xhat
     
-    def sample(self, px_z):
-        return self.forward(px_z)
+    def sample(self, px_z, mu, ln_var):
+        # print(f'mu {mu} ln_var {ln_var}')
+        # xhat = draw_gaussian_diag_samples(mu, ln_var)
+        # xhat = self.out_conv(xhat)
+        xhat = self.forward(px_z)
+        return xhat

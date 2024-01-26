@@ -14,20 +14,21 @@ class Hyperparams(dict):
 
 power = Hyperparams()
 power.width = 7
-power.lr = 0.0002
+power.lr = 0.001
 power.zdim = 7
 power.wd = 0.01
-power.dec_blocks = "1x1,3m1,3x3,7m3,7x6" # x corresponds to residual block, m corresponds to unpool layer
-power.enc_blocks = "7x4,7d2,3x2,3d2,1x3" # x corresponds to residual block, d corresponds to pool layer
+power.dec_blocks = "1x1,3m1,3x1,7m3,7x1" # x corresponds to residual block, m corresponds to unpool layer
+power.enc_blocks = "7x1,7d2,3x1,3d2,1x1" # x corresponds to residual block, d corresponds to pool layer
 power.warmup_iters = 5
 power.dataset = 'power'
 power.n_batch = 1024
 power.ema_rate = 0.9999
 power.data_root = '/home/user1/QOlab/dataset/'
-power.num_epochs = 20
+power.num_epochs = 40
 power.desc = 'power_test'
 power.epochs_per_eval = 5
 power.epochs_per_eval_save = 5
+power.skip_threshold = 10000.
 HPARAMS_REGISTRY['power'] = power
 
 
@@ -42,6 +43,7 @@ cifar10.warmup_iters = 100
 cifar10.dataset = 'cifar10'
 cifar10.n_batch = 16
 cifar10.ema_rate = 0.9999
+cifar10.num_epochs = 20
 HPARAMS_REGISTRY['cifar10'] = cifar10
 
 

@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-from torchquad import MonteCarlo, set_up_backend
+from torchquad import MonteCarlo, set_up_backend, VEGAS
 
 
 OPS = {
@@ -50,19 +50,56 @@ def make_points(attrs, predicates, statistics, bias, alias2table=None):
                 
     return integration_domain
 
+def make_point_raw(attrs, predicates, statistics, bias, alias2table=None):
+    left_bounds = {}
+    right_bounds = {}
+    
+    for attr in attrs:
+        col_name = attr
+        if(len(attr.split('.')) == 2):
+            if alias2table is None:
+                col_name = alias2table[attr.split('.')[0]] + f".{attr.split('.')[1]}"
+                
+        left_bounds[col_name] = statistics[col_name]['min']
+        right_bounds[col_name] = statistics[col_name]['max']
+    
+    for predicate in predicates:
+        if len(predicate) == 3:
+            
+            column = predicate[0] # 适用于imdb的
+            operator = predicate[1]
+            val = float(predicate[2])
+                
+            if operator == '=':
+                left_bounds[column] = val - bias[column] 
+                right_bounds[column] = val + bias[column] 
+                
+            elif operator == '<=':
+                right_bounds[column] = val
+                
+            elif operator  == ">=":
+                left_bounds[column] = val
+                
+    integration_domain = []
+    for attr in attrs:
+        integration_domain.append([left_bounds[attr], right_bounds[attr]])
+                
+    return integration_domain
 
-def estimate_probabilities(ema_vae, integration_domain, dim):
+
+def estimate_probabilities(model, integration_domain, dim):
     integration_domain = torch.Tensor(integration_domain).cuda()
     
     set_up_backend("torch", data_type="float32")
     def multivariate_normal(x):
         x = x.reshape(-1, 1, x.shape[1])
-        
+        # print(f'x:{x}')
         with torch.no_grad():
-            elbo, _ = ema_vae.forward(x, x)
-            prob_list = torch.exp(-elbo)
-            
+            # nelbo = model.module.nelbo(x)
+            nelbo = model.nelbo(x)
+            prob_list = torch.exp(nelbo) / 10000
             return prob_list
+        
     mc = MonteCarlo()
     prob = mc.integrate(
         multivariate_normal,

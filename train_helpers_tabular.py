@@ -101,6 +101,7 @@ def first_rank_first(local_rank, mpi_size):
 
 def setup_save_dirs(H):
     H.save_dir = os.path.join(H.save_dir, H.desc)
+    H.save_dir = os.path.join(H.save_dir, str(H.lr) + '-' + H.dec_blocks + '-' + H.enc_blocks)
     mkdir_p(H.save_dir)
     H.logdir = os.path.join(H.save_dir, 'log')
 

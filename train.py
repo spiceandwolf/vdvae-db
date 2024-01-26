@@ -49,6 +49,8 @@ def get_sample_for_visualization(data, preprocess_fn, num, dataset):
 
 
 def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint):
+    from torch.utils.tensorboard import SummaryWriter
+    writer = SummaryWriter(f'runs/{H.dataset}_lr:{H.lr}_e:{H.enc_blocks}_d:{H.dec_blocks}')
     optimizer, scheduler, cur_eval_loss, iterate, starting_epoch = load_opt(H, vae, logprint)
     train_sampler = DistributedSampler(data_train, num_replicas=H.mpi_size, rank=H.rank)
     viz_batch_original, viz_batch_processed = get_sample_for_visualization(data_valid, preprocess_fn, H.num_images_visualize, H.dataset)
@@ -84,6 +86,10 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint)
         if epoch % H.epochs_per_eval == 0:
             valid_stats = evaluate(H, ema_vae, data_valid, preprocess_fn)
             logprint(model=H.desc, type='eval_loss', epoch=epoch, step=iterate, **valid_stats)
+            
+        
+        for name, para in vae.named_parameters():
+            writer.add_histogram(name, para, epoch)
 
 
 def evaluate(H, ema_vae, data_valid, preprocess_fn):
