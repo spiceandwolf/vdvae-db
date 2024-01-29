@@ -18,6 +18,7 @@
 """
 
 from collections import defaultdict
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -85,9 +86,17 @@ def get_width_settings(width, s):
     return mapping
 
 
-def vae_loss(targets, predictions, kl_dist_list,):
+def gaussian_analytical_kl(mu1, mu2, logsigma1, logsigma2, zdim):
+    return -0.5*zdim + logsigma2 - logsigma1 + 0.5 * (logsigma1.exp() ** 2 + (mu1 - mu2) ** 2) / (logsigma2.exp() ** 2)
+
+
+def vae_loss(targets, predictions, mu, ln_var, mode='nll'):
     reconstruction_loss = 0
-    
+    if mode == 'nll':
+        prec = torch.exp(-1 * ln_var)
+        x_diff = targets - mu
+        x_power = (x_diff * x_diff) * prec * 0.5
+        fn = (ln_var + math.log(2 * torch.pi)) * 0.5 + x_power
 
 '''
     res block
@@ -185,7 +194,7 @@ class TopDownBlock(nn.Module):
         # Samples posterior under expected value of q(z<i|x)
         z = draw_gaussian_diag_samples(qm, qv)
         
-        kl = gaussian_analytical_kl(qm, pm, qv, pv)
+        kl = gaussian_analytical_kl(qm, pm, qv, pv, self.zdim)
         
         return z, x, kl
     
