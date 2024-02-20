@@ -95,9 +95,9 @@ def estimate_probabilities(model, integration_domain, dim):
         x = x.reshape(-1, 1, x.shape[1])
         # print(f'x:{x}')
         with torch.no_grad():
-            # nelbo = model.module.nelbo(x)
-            nelbo = model.nelbo(x)
-            prob_list = torch.exp(nelbo) / 10000
+            nelbo = model.module.nelbo(x)
+            # nelbo = model.nelbo(x)
+            prob_list = torch.exp(nelbo)
             return prob_list
         
     mc = MonteCarlo()

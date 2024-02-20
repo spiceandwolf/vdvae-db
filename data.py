@@ -173,8 +173,8 @@ def cifar10(data_root, one_hot=True):
 def power(data_root):
     trX = np.genfromtxt(os.path.join(data_root, 'household_power_consumption.txt'), skip_header=0, delimiter=';', usecols=[2,3,4,5,6,7,8], missing_values={' ', '?'}, filling_values=np.nan)
     trX = trX[~np.isnan(trX).any(axis=1)]
-    # scaler = MinMaxScaler()
-    # trX = scaler.fit_transform(trX)
+    scaler = MinMaxScaler()
+    trX = scaler.fit_transform(trX)
     np.random.seed(42)
     tr_va_split_indices = np.random.permutation(trX.shape[0])
     split_index = int(trX.shape[0] * 0.1)

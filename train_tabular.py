@@ -243,7 +243,8 @@ def run_query_test_eval(H, ema_vae, noise, logprint):
             count += 1
             continue
         else:
-            est_card = max(prob.item() * n_rows, 1)
+            # est_card = max(prob.item() * n_rows, 1)
+            est_card = max(prob.item(), 1)
             
         qerror = ErrorMetric(est_card, true_card)
         
@@ -281,20 +282,20 @@ def main():
     # return
     if H.test_eval:
         # run_test_eval(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
-        # run_query_test_eval(H, ema_vae, noise, logprint)
-        for i in range(3):
+        run_query_test_eval(H, vae, noise, logprint)
+        # for i in range(3):
             
-            # data_input1 = torch.tensor([[[random.uniform(0, 1) for i in range(7)]]]).cuda()
-            data_input = data_valid_or_test[i][0].reshape(-1, 1, data_valid_or_test[i][0].shape[1]).cuda().float()
-            print(data_input)
+        #     # data_input1 = torch.tensor([[[random.uniform(0, 1) for i in range(7)]]]).cuda()
+        #     data_input = data_valid_or_test[i][0].reshape(-1, 1, data_valid_or_test[i][0].shape[1]).cuda().float()
+        #     print(data_input)
             
-            nelbo = ema_vae.nelbo(data_input)
-            print(f'elbo: {nelbo}')
-            # stats = vae.forward(data_input1, data_input1)
-            # for k in stats:
-            #     print(k, stats[k])
+        #     nelbo = vae.module.nelbo(data_input)
+        #     print(f'elbo: {nelbo}')
+        #     # stats = vae.forward(data_input1, data_input1)
+        #     # for k in stats:
+        #     #     print(k, stats[k])
                 
-            print('--------')
+        #     print('--------')
     else:
         writer = SummaryWriter(f'runs/{H.dataset}_lr:{H.lr}_e:{H.enc_blocks}_d:{H.dec_blocks}')
         

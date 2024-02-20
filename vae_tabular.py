@@ -124,6 +124,9 @@ class DecBlock(nn.Module):
         
         cond_width = int(width * H.bottleneck_multiple)
         
+        if self.mixin is not None:
+            self.unpool = nn.ConvTranspose1d(width, width, 3, 1, 1)
+        
         self.zdim = H.zdim
         self.enc = Block(width * 2, cond_width, H.zdim * 2, residual=False, use_3x1=use_3x1) # parameterises mean and variance
         self.prior = Block(width, cond_width, H.zdim * 2 + width, residual=False, use_3x1=use_3x1, zero_last=True) # parameterises mean, variance and xh
@@ -173,9 +176,11 @@ class DecBlock(nn.Module):
         refer to the topdown block of the Figure.3 in the paper
         '''
         x, acts = self.get_inputs(xs, activations)
+        # print(f'x {x.shape}')
         if self.mixin is not None:
             # x = x + F.interpolate(xs[self.mixin][:, :x.shape[1], ...], scale_factor=self.base // self.mixin)
-            x = x + F.interpolate(xs[self.mixin][:, :x.shape[1], ...], scale_factor=self.base / self.mixin)
+            x = self.unpool(x)
+            # print(f'x unpool {x.shape}')
         z, x, kl = self.sample(x, acts)
         x = x + self.z_fn(z)
         x = self.resnet(x)
@@ -273,7 +278,7 @@ class VAE(HModule):
         ndims = np.prod(x.shape[1:])
         
         for statdict in stats:
-            print(statdict['kl'].shape)
+            # print(statdict['kl'].shape)
             rpp += statdict['kl'].sum(dim=(1,2))
         # rpp /= ndims # （1, 1, width）is a mate
         elbo = (rl + rpp).mean()
@@ -298,7 +303,7 @@ class VAE(HModule):
         # print(activations.keys())
         px_z, stats = self.decoder.forward(activations)
         
-        print(f'y {self.decoder.out_net.forward(px_z)}')
+        # print(f'y {self.decoder.out_net.forward(px_z)}')
         # print(f'y {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain)} {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain).shape}')
         rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
         # print(rl.shape)
@@ -307,12 +312,24 @@ class VAE(HModule):
         ndims = np.prod(x.shape[1:])
         
         for statdict in stats:
-            print(statdict['kl'].shape)
+            # print(statdict['kl'].shape)
             rpp += statdict['kl'].sum(dim=(1,2))
-        rpp /= ndims
+        # rpp /= ndims
         elbo = (rl + rpp)
         # print(f'rl {rl} rpp {rpp}')
         return -elbo
+    
+    # def importance_sampling(self, x, k=1):
+    #     activations = self.encoder.forward(x)
+    #     px_z, stats = self.decoder.forward(activations)
+    #     lls = []
+    #     for i in range(k):
+    #         ll = -1 * self.decoder.out_net.gaussian_nll(x, self.decoder.bias, self.decoder.gain).sum(dim=1)
+    #         ll -= standard_gaussian_nll(z, dim=1)
+    #         ll += gaussian_nll(z, mu=mu_enc, ln_var=ln_var_enc, dim=1)
+    #         lls.append(ll[:, None])
+
+    #     return torch.cat(lls, dim=1).logsumexp(dim=1) - math.log(k)
 
 class OutPutNet(nn.Module):
     '''
@@ -332,11 +349,10 @@ class OutPutNet(nn.Module):
         return re
     
     def gaussian_nll(self, x, mu, ln_var):
-        prec = torch.exp(-1 * ln_var)
+        prec = torch.exp(-2 * ln_var)
         x_diff = x - mu
         x_power = (x_diff * x_diff) * prec * 0.5
-        return (ln_var + math.log(2 * torch.pi)) * 0.5 + x_power
-
+        return (2 * ln_var + math.log(2 * torch.pi)) * 0.5 + x_power
 
     def forward(self, px_z):
         xhat = self.out_conv(px_z)

@@ -221,6 +221,8 @@ class DecoderBlock(nn.Module):
         self.base = res
         self.mixin = mixin
         
+        self.unpool = nn.ConvTranspose1d(width, width, 3, 1, 1)
+        
         self.topDownBlocks = nn.ModuleList([
             TopDownBlock(zdim, res, width, middle_width, n_blocks) for _ in range(n_td_blocks)
         ])
@@ -237,7 +239,8 @@ class DecoderBlock(nn.Module):
     
     def forward(self, x, activation, get_latents=False):
         if self.mixin is not None:
-            x = x + F.interpolate(x, scale_factor=self.base / self.mixin) # ConvTranspose2d？
+            # x = x + F.interpolate(x, scale_factor=self.base / self.mixin) # ConvTranspose？
+            x = self.unpool(x)
         xs, stats = self.sample(x, activation, get_latents=get_latents)
         return xs, stats
 

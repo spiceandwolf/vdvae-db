@@ -24,11 +24,11 @@ power.dataset = 'power'
 power.n_batch = 1024
 power.ema_rate = 0.9999
 power.data_root = '/home/user1/QOlab/dataset/'
-power.num_epochs = 40
+power.num_epochs = 60
 power.desc = 'power_test'
 power.epochs_per_eval = 5
 power.epochs_per_eval_save = 5
-power.skip_threshold = 10000.
+power.skip_threshold = 1000000.
 HPARAMS_REGISTRY['power'] = power
 
 
