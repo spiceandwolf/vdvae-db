@@ -6,6 +6,7 @@ from vae_helpers import HModule, draw_gaussian_diag_samples, gaussian_analytical
 from collections import defaultdict
 import numpy as np
 import itertools
+import torch.distributions as D
 
 
 class Block(nn.Module):
@@ -137,15 +138,21 @@ class DecBlock(nn.Module):
         self.resnet.c4.weight.data *= np.sqrt(1 / n_blocks)
         
         self.z_fn = lambda x: self.z_proj(x)
+        
+        self.distribution = None
 
     def sample(self, x, acts):
         qm, qv = self.enc(torch.cat([x, acts], dim=1)).chunk(2, dim=1) # Calculate q distribution parameters. Chunk into 2 (first z_dim is mean, second is variance)
+        
         feats = self.prior(x) # generated features
         pm, pv = feats[:, :self.zdim, ...], feats[:, self.zdim:self.zdim * 2, ...] # pm and pv are the mean and standard deviation of the Gaussian distribution of the latent code.
+        
         xpp = feats[:, self.zdim * 2:, ...] # xpp is a tensor used to modify x in the next step.                                                                                              
         x = x + xpp
         z = draw_gaussian_diag_samples(qm, qv)
         kl = gaussian_analytical_kl(qm, pm, qv, pv)
+        
+        self.distribution = D.Normal(qm, torch.exp(qv))
         return z, x, kl
 
     def sample_uncond(self, x, t=None, lvs=None):
@@ -185,6 +192,7 @@ class DecBlock(nn.Module):
         x = x + self.z_fn(z)
         x = self.resnet(x)
         xs[self.base] = x # xs means x_sample :)
+        
         if get_latents:
             return xs, dict(z=z.detach(), kl=kl)
         return xs, dict(kl=kl)
@@ -222,12 +230,11 @@ class Decoder(HModule):
         
         self.bias_xs = nn.ParameterList([nn.Parameter(torch.zeros(1, self.widths[res], res)) for res in self.resolutions if res <= H.no_bias_above])
         
-        # self.out_net = DmolNet(H) # the Discretized Mixture of Logistics Net
         self.out_net = OutPutNet(H)
         
-        self.gain = nn.Parameter(torch.ones(1, H.width, 1))
-        self.bias = nn.Parameter(torch.zeros(1, H.width, 1))
-        self.final_fn = lambda x: x * self.gain + self.bias # mu and var?
+        # self.gain = nn.Parameter(torch.ones(1, H.width, 1))
+        # self.bias = nn.Parameter(torch.zeros(1, H.width, 1))
+        # self.final_fn = lambda x: x * self.gain + self.bias # mu and var?
 
     def forward(self, activations, get_latents=False):
         stats = []
@@ -235,7 +242,7 @@ class Decoder(HModule):
         for block in self.dec_blocks:
             xs, block_stats = block(xs, activations, get_latents=get_latents)
             stats.append(block_stats)
-        xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        # xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
         return xs[self.H.image_size], stats
 
     def forward_uncond(self, n, t=None, y=None):
@@ -269,18 +276,20 @@ class VAE(HModule):
     def forward(self, x, x_target):
         # x : [batch_size, channels, length] or [batch_size, channels, height, width]
         activations = self.encoder.forward(x)
-        px_z, stats = self.decoder.forward(activations)
+        _, stats = self.decoder.forward(activations)
+        
+        z_L_distribution = self.decoder.dec_blocks[-1]
         
         # rl = self.decoder.out_net.nll(px_z, x_target, self.decoder.gain).mean(dim=(1,2))
-        rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
+        # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
+        rl = self.decoder.out_net.nll()
         
         rpp = torch.zeros_like(rl) # rate_per_pixel
-        ndims = np.prod(x.shape[1:])
         
         for statdict in stats:
             # print(statdict['kl'].shape)
             rpp += statdict['kl'].sum(dim=(1,2))
-        # rpp /= ndims # （1, 1, width）is a mate
+        
         elbo = (rl + rpp).mean()
         return dict(elbo=elbo, distortion=rl.mean(), rate=rpp.mean()) # distortion is the reconstruction loss, rate is the KL loss
 
@@ -301,22 +310,24 @@ class VAE(HModule):
         # print(f'x {x} {x.shape}')
         activations = self.encoder.forward(x)
         # print(activations.keys())
-        px_z, stats = self.decoder.forward(activations)
+        x_rec, stats = self.decoder.forward(activations)
         
+        
+        # print(f'x {x_rec} {x_rec.shape}')
         # print(f'y {self.decoder.out_net.forward(px_z)}')
         # print(f'y {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain)} {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain).shape}')
-        rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
+        # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
+        rl = stats[-1]['log_likelihood']
         # print(rl.shape)
         
         rpp = torch.zeros_like(rl) # rate_per_pixel
-        ndims = np.prod(x.shape[1:])
         
         for statdict in stats:
             # print(statdict['kl'].shape)
             rpp += statdict['kl'].sum(dim=(1,2))
-        # rpp /= ndims
-        elbo = (rl + rpp)
-        # print(f'rl {rl} rpp {rpp}')
+        
+        elbo = rl + rpp
+        print(f'rl {rl} rpp {rpp}')
         return -elbo
     
     # def importance_sampling(self, x, k=1):
@@ -342,11 +353,11 @@ class OutPutNet(nn.Module):
         self.width = H.width
         self.out_conv = get_3x1(H.width, H.image_channels) # because of the self.in_conv = get_3x1(H.image_channels, H.width) in encoder
 
-    def nll(self, px_z, x, ln_var):
-        loss = torch.nn.MSELoss(reduction='none')
-        # re = loss(x, self.forward(px_z)) * 0.5 * torch.exp(-2 * ln_var) + math.log(2 * torch.pi) * 0.5 + ln_var
-        re = loss(x, self.forward(px_z)) * 0.5
-        return re
+    def nll(self, x, distribution):
+        mu = self.out_conv(distribution.loc)
+        log_var = self.out_conv(distribution.scale)
+        log_likelihood = D.Normal(mu, torch.exp(log_var)).log_prob(x).sum((1,2))
+        return log_likelihood
     
     def gaussian_nll(self, x, mu, ln_var):
         prec = torch.exp(-2 * ln_var)
