@@ -278,20 +278,20 @@ class VAE(HModule):
         activations = self.encoder.forward(x)
         _, stats = self.decoder.forward(activations)
         
-        z_L_distribution = self.decoder.dec_blocks[-1]
+        z_L_distribution = self.decoder.dec_blocks[-1].distribution
         
         # rl = self.decoder.out_net.nll(px_z, x_target, self.decoder.gain).mean(dim=(1,2))
         # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
-        rl = self.decoder.out_net.nll()
+        ll = self.decoder.out_net.ll(x, z_L_distribution)
         
-        rpp = torch.zeros_like(rl) # rate_per_pixel
+        rpp = torch.zeros_like(ll) # rate_per_pixel
         
         for statdict in stats:
             # print(statdict['kl'].shape)
             rpp += statdict['kl'].sum(dim=(1,2))
         
-        elbo = (rl + rpp).mean()
-        return dict(elbo=elbo, distortion=rl.mean(), rate=rpp.mean()) # distortion is the reconstruction loss, rate is the KL loss
+        nelbo = (-ll + rpp).mean()
+        return dict(elbo=nelbo, distortion=ll.mean(), rate=rpp.mean()) # distortion is the reconstruction loss, rate is the KL loss
 
     def forward_get_latents(self, x):
         activations = self.encoder.forward(x)
@@ -306,29 +306,32 @@ class VAE(HModule):
         px_z = self.decoder.forward_manual_latents(n_batch, latents, t=t)
         return self.decoder.out_net.sample(px_z)
     
-    def nelbo(self, x):
+    def elbo(self, x):
         # print(f'x {x} {x.shape}')
         activations = self.encoder.forward(x)
         # print(activations.keys())
-        x_rec, stats = self.decoder.forward(activations)
+        _, stats = self.decoder.forward(activations)
         
-        
-        # print(f'x {x_rec} {x_rec.shape}')
-        # print(f'y {self.decoder.out_net.forward(px_z)}')
         # print(f'y {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain)} {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain).shape}')
         # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
-        rl = stats[-1]['log_likelihood']
-        # print(rl.shape)
+        z_L_distribution = self.decoder.dec_blocks[-1].distribution
         
-        rpp = torch.zeros_like(rl) # rate_per_pixel
+        # rl = self.decoder.out_net.nll(px_z, x_target, self.decoder.gain).mean(dim=(1,2))
+        # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
+        ll = self.decoder.out_net.ll(x, z_L_distribution)
+        # print(f'll {ll} {ll.shape}')
+        # x_rec = self.decoder.out_net.sample(z_L_distribution)
+        # print(f'x_rec {x_rec} {x_rec.shape}')
+        
+        kl_divergence = torch.zeros_like(ll) # rate_per_pixel
         
         for statdict in stats:
             # print(statdict['kl'].shape)
-            rpp += statdict['kl'].sum(dim=(1,2))
+            kl_divergence += statdict['kl'].sum(dim=(1,2))
         
-        elbo = rl + rpp
-        print(f'rl {rl} rpp {rpp}')
-        return -elbo
+        elbo = (ll - kl_divergence)
+        return elbo
+    
     
     # def importance_sampling(self, x, k=1):
     #     activations = self.encoder.forward(x)
@@ -351,12 +354,14 @@ class OutPutNet(nn.Module):
         super().__init__()
         self.H = H
         self.width = H.width
+        self.std_activation = nn.Softplus(beta=np.log(2))
         self.out_conv = get_3x1(H.width, H.image_channels) # because of the self.in_conv = get_3x1(H.image_channels, H.width) in encoder
 
-    def nll(self, x, distribution):
-        mu = self.out_conv(distribution.loc)
-        log_var = self.out_conv(distribution.scale)
-        log_likelihood = D.Normal(mu, torch.exp(log_var)).log_prob(x).sum((1,2))
+    def ll(self, x, distribution):
+        mu, var = self.forward(distribution)
+        # print(f' mu: {mu} std {var}')
+        
+        log_likelihood = D.Normal(mu, var).log_prob(x).sum((1,2))
         return log_likelihood
     
     def gaussian_nll(self, x, mu, ln_var):
@@ -365,13 +370,15 @@ class OutPutNet(nn.Module):
         x_power = (x_diff * x_diff) * prec * 0.5
         return (2 * ln_var + math.log(2 * torch.pi)) * 0.5 + x_power
 
-    def forward(self, px_z):
-        xhat = self.out_conv(px_z)
-        return xhat
+    def forward(self, distribution):
+        mu = self.out_conv(distribution.mean)
+        var = self.out_conv(torch.exp(distribution.stddev))
+        var = self.std_activation(var)
+        
+        return mu, var
     
-    def sample(self, px_z, mu, ln_var):
-        # print(f'mu {mu} ln_var {ln_var}')
-        # xhat = draw_gaussian_diag_samples(mu, ln_var)
-        # xhat = self.out_conv(xhat)
-        xhat = self.forward(px_z)
-        return xhat
+    def sample(self, distribution):
+        mu, var = self.forward(distribution)
+        # print(f' mu: {mu} std {var}')
+        eps = torch.empty_like(mu).normal_(0., 1.)
+        return var * eps + mu

@@ -188,7 +188,8 @@ def run_query_test_eval(H, ema_vae, noise, logprint):
         for c, o, v in zip(cols, ops, vals):
             predicates.append((c, o, v))
         
-        integration_domain = make_point_raw(table_data.columns, predicates, statistics, noise)
+        # integration_domain = make_point_raw(table_data.columns, predicates, statistics, noise)
+        integration_domain = make_points(table_data.columns, predicates, statistics, noise)
         
         # integration_domain = []
         # for attr in table_data.columns:
@@ -232,7 +233,7 @@ def run_query_test_eval(H, ema_vae, noise, logprint):
         
         # print(f'{x1} {x2}')
         
-        # print(integration_domain)
+        print(integration_domain)
         
         prob = estimate_probabilities(ema_vae, integration_domain, dim)
         
@@ -243,15 +244,19 @@ def run_query_test_eval(H, ema_vae, noise, logprint):
             count += 1
             continue
         else:
-            # est_card = max(prob.item() * n_rows, 1)
-            est_card = max(prob.item(), 1)
+            est_card = max(prob.item() * n_rows, 1)
+            # est_card = max(prob.item(), 1)
+            if est_card > n_rows:
+                count += 1
+                est_card = min(est_card, n_rows)
+                print(f'true_card: {true_card}')
             
         qerror = ErrorMetric(est_card, true_card)
         
         # print(f'Query: {predicates}, True Card: {true_card}, Est Card: {est_card}, QError: {qerror}')
         qerrors.append(qerror)
         
-        # break
+        break
         
     print(f'estimation failed times: {count}')    
     print('test results')
@@ -282,20 +287,21 @@ def main():
     # return
     if H.test_eval:
         # run_test_eval(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
-        # run_query_test_eval(H, vae, noise, logprint)
-        for i in range(3):
+        run_query_test_eval(H, vae, noise, logprint)
+        # for i in range(3):
             
-            # data_input1 = torch.tensor([[[random.uniform(0, 1) for i in range(7)]]]).cuda()
-            data_input = data_valid_or_test[i][0].reshape(-1, 1, data_valid_or_test[i][0].shape[1]).cuda().float()
-            print(data_input)
+        #     # data_input1 = torch.tensor([[[random.uniform(0, 1) for i in range(7)]]]).cuda()
+        #     data_input = data_valid_or_test[i][0].reshape(-1, 1, data_valid_or_test[i][0].shape[1]).cuda().float()
+        #     print(f'data_input {data_input} {data_input.shape}')
             
-            nelbo = vae.module.nelbo(data_input)
-            print(f'nelbo: {nelbo}')
-            # stats = vae.forward(data_input1, data_input1)
-            # for k in stats:
-            #     print(k, stats[k])
+        #     elbo = vae.module.elbo(data_input)
+        #     print(f'elbo: {elbo}')
+            
+        #     # stats = vae.forward(data_input1, data_input1)
+        #     # for k in stats:
+        #     #     print(k, stats[k])
                 
-            print('--------')
+        #     print('--------')
     else:
         writer = SummaryWriter(f'runs/{H.dataset}_lr:{H.lr}_e:{H.enc_blocks}_d:{H.dec_blocks}')
         

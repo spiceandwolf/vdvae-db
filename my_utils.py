@@ -27,22 +27,22 @@ def make_points(attrs, predicates, statistics, bias, alias2table=None):
         left_bounds[col_name] = 0
         right_bounds[col_name] = 1
     
-    for predicate in predicates:
-        if len(predicate) == 3:
+    # for predicate in predicates:
+    #     if len(predicate) == 3:
             
-            column = predicate[0] # 适用于imdb的
-            operator = predicate[1]
-            val = float(predicate[2])
+    #         column = predicate[0] # 适用于imdb的
+    #         operator = predicate[1]
+    #         val = float(predicate[2])
                 
-            if operator == '=':
-                left_bounds[column] = (val - bias[column] - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
-                right_bounds[column] = (val + bias[column] - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
+    #         if operator == '=':
+    #             left_bounds[column] = (val - bias[column] - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
+    #             right_bounds[column] = (val + bias[column] - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
                 
-            elif operator == '<=':
-                right_bounds[column] = (val - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
+    #         elif operator == '<=':
+    #             right_bounds[column] = (val - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
                 
-            elif operator  == ">=":
-                left_bounds[column] = (val - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
+    #         elif operator  == ">=":
+    #             left_bounds[column] = (val - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
                 
     integration_domain = []
     for attr in attrs:
@@ -66,7 +66,7 @@ def make_point_raw(attrs, predicates, statistics, bias, alias2table=None):
     for predicate in predicates:
         if len(predicate) == 3:
             
-            column = predicate[0] # 适用于imdb的
+            column = predicate[0] 
             operator = predicate[1]
             val = float(predicate[2])
                 
@@ -95,9 +95,9 @@ def estimate_probabilities(model, integration_domain, dim):
         x = x.reshape(-1, 1, x.shape[1])
         # print(f'x:{x}')
         with torch.no_grad():
-            nelbo = model.module.nelbo(x)
-            # nelbo = model.nelbo(x)
-            prob_list = torch.exp(nelbo)
+            elbo = model.module.elbo(x)
+            # nelbo = model.elbo(x)
+            prob_list = torch.exp(elbo)
             return prob_list
         
     mc = MonteCarlo()
