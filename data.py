@@ -45,7 +45,11 @@ def set_up_data(H):
         shift = -120.63838
         scale = 1. / 64.16736
     elif H.dataset == 'power':
-        trX, vaX, teX = power(H.data_root)
+        H.pad_value = [0.] * H.width
+        if H.noise_value is not None:
+            for i, ss in enumerate(H.noise_value.split(',')):
+                H.pad_value[i] = float(ss)
+        trX, vaX, teX = power(H.data_root, H.pad_value)
         H.image_size = 7
         H.image_channels = 1
         shift = -120.63838
@@ -170,11 +174,15 @@ def cifar10(data_root, one_hot=True):
     return (trX, trY), (vaX, vaY), (teX, teY)
 
 
-def power(data_root):
+def power(data_root, pad_value):
     trX = np.genfromtxt(os.path.join(data_root, 'household_power_consumption.txt'), skip_header=0, delimiter=';', usecols=[2,3,4,5,6,7,8], missing_values={' ', '?'}, filling_values=np.nan)
     trX = trX[~np.isnan(trX).any(axis=1)]
-    scaler = MinMaxScaler()
-    trX = scaler.fit_transform(trX)
+    feature_range = [0, 1]
+    pad_value = np.array(pad_value)
+    data_max_ = trX.max(axis=0) + 2 * pad_value 
+    data_min_ = trX.min(axis=0) - 2 * pad_value 
+    trX = (trX - data_min_) / (data_max_ - data_min_)
+    trX = trX * (feature_range[1] - feature_range[0] ) + feature_range[0]
     np.random.seed(42)
     tr_va_split_indices = np.random.permutation(trX.shape[0])
     split_index = int(trX.shape[0] * 0.1)

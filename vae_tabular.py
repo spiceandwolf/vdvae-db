@@ -27,7 +27,7 @@ class Block(nn.Module):
         xhat = self.c4(F.gelu(xhat))
         out = x + xhat if self.residual else xhat
         if self.down_rate is not None:
-            out = F.avg_pool1d(out, kernel_size=self.down_rate, stride=self.down_rate)
+            out = F.avg_pool1d(out, kernel_size=self.down_rate, stride=self.down_rate, ceil_mode=True)
         return out
     
     
@@ -57,8 +57,8 @@ def parse_layer_string(s):
             res, mixin = [int(a) for a in ss.split('m')]
             layers.append((res, mixin))
         elif 'd' in ss:
-            res, down_rate = [int(a) for a in ss.split('d')]
-            layers.append((res, down_rate))
+            res, output_size = [int(a) for a in ss.split('d')]
+            layers.append((res, output_size))
         else:
             res = int(ss)
             layers.append((res, None))
@@ -82,7 +82,21 @@ def get_width_settings(width, s):
     return mapping
 
 
-class Encoder(HModule):
+@torch.jit.script
+def gaussian_analytical_kl_std(mu1, mu2, std1, std2):
+    term1 = (mu1 - mu2) / std2
+    term2 = std1 / std2
+    loss = 0.5 * (term1 * term1 + term2 * term2) - 0.5 - torch.log(term2)
+    return loss
+
+
+@torch.jit.script
+def draw_gaussian_diag_samples_std(mu, sigma):
+    eps = torch.empty_like(mu).normal_(0., 1.)
+    return sigma * eps + mu
+
+
+class bottom_up(HModule):
     def build(self):
         H = self.H
         self.in_conv = get_3x1(H.image_channels, H.width)
@@ -90,9 +104,9 @@ class Encoder(HModule):
         enc_blocks = []
         blockstr = parse_layer_string(H.enc_blocks)
         # res means resolution ?
-        for res, down_rate in blockstr: 
+        for res, output_size in blockstr: 
             use_3x1 = res > 2  # Don't use 3x1s for 1x1, 2x1 patches
-            enc_blocks.append(Block(self.widths[res], int(self.widths[res] * H.bottleneck_multiple), self.widths[res], down_rate=down_rate, residual=True, use_3x1=use_3x1))
+            enc_blocks.append(Block(self.widths[res], int(self.widths[res] * H.bottleneck_multiple), self.widths[res], down_rate=output_size, residual=True, use_3x1=use_3x1))
         n_blocks = len(blockstr)
         for b in enc_blocks:
             b.c4.weight.data *= np.sqrt(1 / n_blocks)
@@ -120,15 +134,18 @@ class DecBlock(nn.Module):
         self.mixin = mixin
         self.H = H
         self.widths = get_width_settings(H.width, H.custom_width_str)
+        
         width = self.widths[res]
         use_3x1 = res > 2
         
         cond_width = int(width * H.bottleneck_multiple)
         
         if self.mixin is not None:
-            self.unpool = nn.ConvTranspose1d(width, width, 3, 1, 1)
+            scale_factor = math.ceil(self.base / self.mixin)
+            self.unpool = nn.ConvTranspose1d(width, width, scale_factor, scale_factor, 0)
         
         self.zdim = H.zdim
+        
         self.enc = Block(width * 2, cond_width, H.zdim * 2, residual=False, use_3x1=use_3x1) # parameterises mean and variance
         self.prior = Block(width, cond_width, H.zdim * 2 + width, residual=False, use_3x1=use_3x1, zero_last=True) # parameterises mean, variance and xh
         
@@ -139,9 +156,11 @@ class DecBlock(nn.Module):
         
         self.z_fn = lambda x: self.z_proj(x)
         
+        self.softplus = torch.nn.Softplus(beta=H.gradient_smoothing_beta)
         self.distribution = None
 
     def sample(self, x, acts):
+        # print(f'x {x.shape} acts {acts.shape}')
         qm, qv = self.enc(torch.cat([x, acts], dim=1)).chunk(2, dim=1) # Calculate q distribution parameters. Chunk into 2 (first z_dim is mean, second is variance)
         
         feats = self.prior(x) # generated features
@@ -149,10 +168,17 @@ class DecBlock(nn.Module):
         
         xpp = feats[:, self.zdim * 2:, ...] # xpp is a tensor used to modify x in the next step.                                                                                              
         x = x + xpp
-        z = draw_gaussian_diag_samples(qm, qv)
-        kl = gaussian_analytical_kl(qm, pm, qv, pv)
         
-        self.distribution = D.Normal(qm, torch.exp(qv))
+        # z = draw_gaussian_diag_samples(qm, qv)
+        # kl = gaussian_analytical_kl(qm, pm, qv, pv)
+        # self.distribution = D.Normal(qm, torch.exp(qv))
+        
+        qv = self.softplus(qv)
+        pv = self.softplus(pv)
+        z = draw_gaussian_diag_samples_std(qm, qv)
+        kl = gaussian_analytical_kl_std(qm, pm, qv, pv)
+        self.distribution = D.Normal(qm, qv)
+        
         return z, x, kl
 
     def sample_uncond(self, x, t=None, lvs=None):
@@ -185,8 +211,8 @@ class DecBlock(nn.Module):
         x, acts = self.get_inputs(xs, activations)
         # print(f'x {x.shape}')
         if self.mixin is not None:
-            # x = x + F.interpolate(xs[self.mixin][:, :x.shape[1], ...], scale_factor=self.base // self.mixin)
-            x = self.unpool(x)
+            # print(f'x unpool {self.unpool(xs[self.mixin][:, :x.shape[1], ...]).shape}')
+            x = x + self.unpool(xs[self.mixin][:, :x.shape[1], ...])[:, :, :x.shape[2]]
             # print(f'x unpool {x.shape}')
         z, x, kl = self.sample(x, acts)
         x = x + self.z_fn(z)
@@ -212,7 +238,7 @@ class DecBlock(nn.Module):
         return xs
 
 
-class Decoder(HModule):
+class top_down(HModule):
 
     def build(self):
         H = self.H
@@ -238,7 +264,8 @@ class Decoder(HModule):
 
     def forward(self, activations, get_latents=False):
         stats = []
-        xs = {a.shape[1]: a for a in self.bias_xs}
+        xs = {a.shape[2]: a for a in self.bias_xs}
+        # print(f'xs : {xs}')
         for block in self.dec_blocks:
             xs, block_stats = block(xs, activations, get_latents=get_latents)
             stats.append(block_stats)
@@ -270,8 +297,8 @@ class Decoder(HModule):
 
 class VAE(HModule):
     def build(self):
-        self.encoder = Encoder(self.H)
-        self.decoder = Decoder(self.H)
+        self.encoder = bottom_up(self.H)
+        self.decoder = top_down(self.H)
 
     def forward(self, x, x_target):
         # x : [batch_size, channels, length] or [batch_size, channels, height, width]
@@ -284,14 +311,14 @@ class VAE(HModule):
         # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
         ll = self.decoder.out_net.ll(x, z_L_distribution)
         
-        rpp = torch.zeros_like(ll) # rate_per_pixel
+        kl_dist = torch.zeros_like(ll) 
         
         for statdict in stats:
             # print(statdict['kl'].shape)
-            rpp += statdict['kl'].sum(dim=(1,2))
+            kl_dist += statdict['kl'].sum(dim=(1,2))
         
-        nelbo = (-ll + rpp).mean()
-        return dict(elbo=nelbo, distortion=ll.mean(), rate=rpp.mean()) # distortion is the reconstruction loss, rate is the KL loss
+        nelbo = (-ll + kl_dist).mean()
+        return dict(nelbo=nelbo, recon=ll.mean(), kl_dist=kl_dist.mean()) 
 
     def forward_get_latents(self, x):
         activations = self.encoder.forward(x)
@@ -312,15 +339,11 @@ class VAE(HModule):
         # print(activations.keys())
         _, stats = self.decoder.forward(activations)
         
-        # print(f'y {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain)} {self.decoder.out_net.sample(px_z, self.decoder.bias, self.decoder.gain).shape}')
-        # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
         z_L_distribution = self.decoder.dec_blocks[-1].distribution
         
-        # rl = self.decoder.out_net.nll(px_z, x_target, self.decoder.gain).mean(dim=(1,2))
-        # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
         ll = self.decoder.out_net.ll(x, z_L_distribution)
         # print(f'll {ll} {ll.shape}')
-        # x_rec = self.decoder.out_net.sample(z_L_distribution)
+        x_rec = self.decoder.out_net.sample(z_L_distribution)
         # print(f'x_rec {x_rec} {x_rec.shape}')
         
         kl_divergence = torch.zeros_like(ll) # rate_per_pixel
@@ -347,21 +370,22 @@ class VAE(HModule):
 
 class OutPutNet(nn.Module):
     '''
-    simple MSE reconstruction and KL loss, more weighted towards reconstruction loss.
-    Adapted from https://github.com/vvvm23/vdvae/blob/main/train.py
+    Adapted from https://github.com/JakobHavtorn/hvae-oodd/blob/main/oodd/layers/likelihoods.py
     '''
     def __init__(self, H):
         super().__init__()
         self.H = H
         self.width = H.width
-        self.std_activation = nn.Softplus(beta=np.log(2))
-        self.out_conv = get_3x1(H.width, H.image_channels) # because of the self.in_conv = get_3x1(H.image_channels, H.width) in encoder
+        self.std_activation = nn.Softplus(beta=0.6931472) # ln(2) ~= 0.6931472.
+        self.out_conv = get_3x1(H.width * 2, H.image_channels * 2) # because of the self.in_conv = get_3x1(H.image_channels, H.width) in encoder
 
     def ll(self, x, distribution):
         mu, var = self.forward(distribution)
         # print(f' mu: {mu} std {var}')
         
+        # mse
         log_likelihood = D.Normal(mu, var).log_prob(x).sum((1,2))
+        
         return log_likelihood
     
     def gaussian_nll(self, x, mu, ln_var):
@@ -371,8 +395,9 @@ class OutPutNet(nn.Module):
         return (2 * ln_var + math.log(2 * torch.pi)) * 0.5 + x_power
 
     def forward(self, distribution):
-        mu = self.out_conv(distribution.mean)
-        var = self.out_conv(torch.exp(distribution.stddev))
+        # print(f'mean {distribution.mean.shape}')
+        mu, var = self.out_conv(torch.cat([distribution.mean, distribution.stddev], dim=1)).chunk(2, dim=1)
+        # _, var = logstd_downbounded(var, torch.tensor(self.H.min_std_value, device=var.device, dtype=var.dtype))
         var = self.std_activation(var)
         
         return mu, var

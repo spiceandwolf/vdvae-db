@@ -14,21 +14,23 @@ class Hyperparams(dict):
 
 power = Hyperparams()
 power.width = 7
-power.lr = 0.0001
+# power.lr = 0.00001
 power.zdim = 7
 power.wd = 0.01
-power.dec_blocks = "1x4,3m1,3x2,7m3,7x1" # x corresponds to residual block, m corresponds to unpool layer
-power.enc_blocks = "7x1,7d2,3x3,3d2,1x6" # x corresponds to residual block, d corresponds to pool layer
-power.warmup_iters = 5
+# power.dec_blocks = "1x1,4m1,4x1,7m4,7x1" # x corresponds to residual block, m corresponds to unpool layer
+# power.enc_blocks = "7x1,7d2,4x1,4d4,1x1" # x corresponds to residual block, d corresponds to pool layer
+power.warmup_iters = 15
 power.dataset = 'power'
 power.n_batch = 1024
 power.ema_rate = 0.9999
 power.data_root = '/home/user1/QOlab/dataset/'
-power.num_epochs = 20
+# power.num_epochs = 60
 power.desc = 'power_test'
 power.epochs_per_eval = 5
 power.epochs_per_eval_save = 5
-power.skip_threshold = 1000.
+power.skip_threshold = 800.
+power.grad_clip = 300
+power.noise_value = '0.0005, 0.0005, 0.005, 0.05, 0.5, 0.5, 0.5'
 HPARAMS_REGISTRY['power'] = power
 
 
@@ -177,4 +179,12 @@ def add_vae_arguments(parser):
     parser.add_argument('--num_images_visualize', type=int, default=8)
     parser.add_argument('--num_variables_visualize', type=int, default=6)
     parser.add_argument('--num_temperatures_visualize', type=int, default=3)
+    
+    parser.add_argument('--test_name', type=str, default=None)
+    parser.add_argument('--noise_value', type=str, default=None)
+    parser.add_argument('--add_noise', type=bool, default=False)
+    parser.add_argument('--noise_type', type=str, default='gaussian')
+    parser.add_argument('--raw_data', type=bool, default=False)
+    parser.add_argument('--gradient_smoothing_beta', type=float, default=0.6931472)
+    
     return parser

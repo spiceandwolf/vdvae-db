@@ -101,7 +101,8 @@ def first_rank_first(local_rank, mpi_size):
 
 def setup_save_dirs(H):
     H.save_dir = os.path.join(H.save_dir, H.desc)
-    H.save_dir = os.path.join(H.save_dir, str(H.lr) + '-' + H.dec_blocks + '-' + H.enc_blocks)
+    # H.save_dir = os.path.join(H.save_dir, str(H.lr) + '-' + H.dec_blocks + '-' + H.enc_blocks)
+    H.save_dir = os.path.join(H.save_dir, H.test_name)
     mkdir_p(H.save_dir)
     H.logdir = os.path.join(H.save_dir, 'log')
 
@@ -178,7 +179,8 @@ def load_vaes(H, logprint):
 
 def load_opt(H, vae, logprint):
     optimizer = AdamW(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2))
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
+    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=10000, eta_min=1e-6)
 
     if H.restore_optimizer_path:
         optimizer.load_state_dict(
