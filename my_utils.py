@@ -16,7 +16,7 @@ OPS = {
 }
 
 
-def test_integrate(attrs, alias2table=None):
+def test_integrate(attrs, min = 0, max = 1, alias2table=None):
     left_bounds = {}
     right_bounds = {}
     
@@ -26,8 +26,8 @@ def test_integrate(attrs, alias2table=None):
             if alias2table is None:
                 col_name = alias2table[attr.split('.')[0]] + f".{attr.split('.')[1]}"
                 
-        left_bounds[col_name] = 0
-        right_bounds[col_name] = 1
+        left_bounds[col_name] = min
+        right_bounds[col_name] = max
                 
     integration_domain = []
     for attr in attrs:
@@ -35,18 +35,10 @@ def test_integrate(attrs, alias2table=None):
                 
     return integration_domain
 
-def make_points(attrs, predicates, statistics, bias, alias2table=None):
-    left_bounds = {}
-    right_bounds = {}
-    
-    for attr in attrs:
-        col_name = attr
-        if(len(attr.split('.')) == 2):
-            if alias2table is None:
-                col_name = alias2table[attr.split('.')[0]] + f".{attr.split('.')[1]}"
-                
-        left_bounds[col_name] = 0
-        right_bounds[col_name] = 1
+def make_points(table_stats, predicates, bias, noise_type=None, alias2table=None):
+    attrs, right_bounds, left_bounds = table_stats
+    maxs = right_bounds
+    mins = left_bounds
     
     for predicate in predicates:
         if len(predicate) == 3:
@@ -54,20 +46,39 @@ def make_points(attrs, predicates, statistics, bias, alias2table=None):
             column = predicate[0] # 适用于imdb的
             operator = predicate[1]
             val = float(predicate[2])
+            
+            if noise_type == 'uniform':
+                if operator == '=':
+                    left_bounds[column] = val
+                    right_bounds[column] = val + 2 * bias[column]
                 
-            if operator == '=':
-                left_bounds[column] = (val - bias[column] - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
-                right_bounds[column] = (val + bias[column] - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
-                
-            elif operator == '<=':
-                right_bounds[column] = (val + bias[column] - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
-                
-            elif operator  == ">=":
-                left_bounds[column] = (val - bias[column] - statistics[column]['min']) / (statistics[column]['max'] - statistics[column]['min'])
-                
+                elif operator == '<=':
+                    left_bounds[column] = mins[column] 
+                    right_bounds[column] = val + 2 * bias[column] 
+                    
+                elif operator  == ">=":
+                    left_bounds[column] = val 
+                    right_bounds[column] = maxs[column] 
+            else:
+                if operator == '=':
+                    left_bounds[column] = val - bias[column] 
+                    right_bounds[column] = val + bias[column] 
+                    
+                elif operator == '<=':
+                    left_bounds[column] = mins[column] 
+                    right_bounds[column] = val + bias[column] 
+                    
+                elif operator  == ">=":
+                    left_bounds[column] = val - bias[column] 
+                    right_bounds[column] = maxs[column]
+    
+    # print(f'left_bounds {left_bounds} right_bounds {right_bounds}')
+                        
     integration_domain = []
+    
     for attr in attrs:
-        integration_domain.append([left_bounds[attr], right_bounds[attr]])
+        assert left_bounds[attr] < right_bounds[attr], f'predicates {predicates} attr {attr} left_bounds {left_bounds[attr]} right_bounds {right_bounds[attr]}'
+        integration_domain.append([(left_bounds[attr] - mins[attr]) / (maxs[attr] - mins[attr]), (right_bounds[attr] - mins[attr]) / (maxs[attr] - mins[attr])])
                 
     return integration_domain
 
@@ -121,8 +132,8 @@ def estimate_probabilities(model, integration_domain, dim):
             prob_list = torch.exp(elbo)
             return prob_list
         
-    # integrater = MonteCarlo()
-    integrater = VEGAS()
+    integrater = MonteCarlo()
+    # integrater = VEGAS()
     prob = integrater.integrate(
         multivariate_normal,
         dim=dim,

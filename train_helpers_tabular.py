@@ -180,7 +180,7 @@ def load_vaes(H, logprint):
 def load_opt(H, vae, logprint):
     optimizer = AdamW(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2))
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=10000, eta_min=1e-6)
+    scheduler = NarrowCosineDecay(optimizer, decay_steps=H.decay_iters, decay_start=H.decay_start, minimum_learning_rate=H.min_lr, last_epoch=H.last_epoch, warmup_steps=H.warmup_iters)
 
     if H.restore_optimizer_path:
         optimizer.load_state_dict(
@@ -191,3 +191,28 @@ def load_opt(H, vae, logprint):
         cur_eval_loss, iterate, starting_epoch = float('inf'), 0, 0
     logprint('starting at epoch', starting_epoch, 'iterate', iterate, 'eval loss', cur_eval_loss)
     return optimizer, scheduler, cur_eval_loss, iterate, starting_epoch
+
+class NarrowCosineDecay(torch.optim.lr_scheduler.CosineAnnealingLR):
+    def __init__(self, optimizer, decay_steps, warmup_steps, decay_start=0, minimum_learning_rate=None, last_epoch=-1,
+                 verbose=False):
+        self.decay_steps = decay_steps
+        self.decay_start = decay_start
+        self.minimum_learning_rate = minimum_learning_rate
+        self.warmup_steps = warmup_steps
+
+        assert self.warmup_steps <= self.decay_start
+
+        super(NarrowCosineDecay, self).__init__(optimizer=optimizer, last_epoch=last_epoch, T_max=decay_steps,
+                                                eta_min=self.minimum_learning_rate)
+
+    def get_lr(self):
+        if self.last_epoch < self.decay_start:
+            return [v * (np.minimum(torch.tensor(1.), self.last_epoch / self.warmup_steps)) for v in self.base_lrs]
+        else:
+            return super(NarrowCosineDecay, self).get_lr()
+
+    def _get_closed_form_lr(self):
+        if self.last_epoch < self.decay_start:
+            return [v * (np.minimum(torch.tensor(1.), self.last_epoch / self.warmup_steps)) for v in self.base_lrs]
+        else:
+            return super(NarrowCosineDecay, self)._get_closed_form_lr()

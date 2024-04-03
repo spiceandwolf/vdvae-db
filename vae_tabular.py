@@ -11,14 +11,16 @@ import torch.distributions as D
 
 class Block(nn.Module):
     
-    def __init__(self, in_width, middle_width, out_width, down_rate=None, residual=False, use_3x1=True, zero_last=False):
+    def __init__(self, in_channels, middle_channels, out_channels, down_rate=None, residual=False, use_3x1=True, zero_last=False, pool=None):
         super().__init__()
         self.down_rate = down_rate
         self.residual = residual
-        self.c1 = get_1x1(in_width, middle_width)
-        self.c2 = get_3x1(middle_width, middle_width) if use_3x1 else get_1x1(middle_width, middle_width)
-        self.c3 = get_3x1(middle_width, middle_width) if use_3x1 else get_1x1(middle_width, middle_width)
-        self.c4 = get_1x1(middle_width, out_width, zero_weights=zero_last)
+        self.c1 = get_1x1(in_channels, middle_channels)
+        self.c2 = get_3x1(middle_channels, middle_channels) if use_3x1 else get_1x1(middle_channels, middle_channels)
+        self.c3 = get_3x1(middle_channels, middle_channels) if use_3x1 else get_1x1(middle_channels, middle_channels)
+        self.c4 = get_1x1(middle_channels, out_channels, zero_weights=zero_last)
+        if self.down_rate is not None:
+            self.pool = pool
 
     def forward(self, x):
         xhat = self.c1(F.gelu(x))
@@ -27,23 +29,62 @@ class Block(nn.Module):
         xhat = self.c4(F.gelu(xhat))
         out = x + xhat if self.residual else xhat
         if self.down_rate is not None:
-            out = F.avg_pool1d(out, kernel_size=self.down_rate, stride=self.down_rate, ceil_mode=True)
+            out = self.pool(out)
         return out
     
     
-def get_conv(in_dim, out_dim, kernel_size, stride, padding, zero_bias=True, zero_weights=False, groups=1, scaled=False):
-    c = nn.Conv1d(in_dim, out_dim, kernel_size, stride, padding, groups=groups)
+class PoolLayer(nn.Module):
+    def __init__(self, in_channels, out_channels, input_size, strides):
+        super(PoolLayer, self).__init__()
+
+        if input_size % 2 != 0:
+            ops = [nn.Conv1d(in_channels=in_channels, out_channels=out_channels,
+                        kernel_size=3, stride=strides),
+                    nn.GELU()]
+        else:
+            ops = [nn.Conv1d(in_channels=in_channels, out_channels=out_channels,
+                        kernel_size=strides, stride=strides),
+                    nn.GELU()]
+
+        self.ops = nn.Sequential(*ops)
+
+    def forward(self, x):
+        x = self.ops(x)
+        return x
+    
+    
+class Unpoolayer(nn.Module):
+    def __init__(self, in_channels, out_channels, out_size, mixin):
+        super(Unpoolayer, self).__init__()
+        
+        if out_size % 2 != 0:
+            assert out_size // mixin == 2 or mixin == 1
+            ops = [nn.ConvTranspose1d(in_channels, out_channels, 3, 2),
+                        nn.GELU()]
+        else: 
+            ops = [nn.ConvTranspose1d(in_channels, out_channels, out_size // mixin, out_size // mixin),
+                        nn.GELU()]
+        
+        self.ops = nn.Sequential(*ops)
+        
+    def forward(self, x):
+        x = self.ops(x)
+        return x
+
+    
+def get_conv(in_channels, out_channels, kernel_size, stride, padding, zero_bias=True, zero_weights=False, groups=1, scaled=False):
+    c = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, groups=groups)
     if zero_bias:
         c.bias.data *= 0.0
     if zero_weights:
         c.weight.data *= 0.0
     return c
 
-def get_3x1(in_dim, out_dim, zero_bias=True, zero_weights=False, groups=1, scaled=False):
-    return get_conv(in_dim, out_dim, 3, 1, 1, zero_bias, zero_weights, groups=groups, scaled=scaled)
+def get_3x1(in_channels, out_channels, zero_bias=True, zero_weights=False, groups=1, scaled=False):
+    return get_conv(in_channels, out_channels, 3, 1, 1, zero_bias, zero_weights, groups=groups, scaled=scaled)
 
-def get_1x1(in_dim, out_dim, zero_bias=True, zero_weights=False, groups=1, scaled=False):
-    return get_conv(in_dim, out_dim, 1, 1, 0, zero_bias, zero_weights, groups=groups, scaled=scaled)
+def get_1x1(in_channels, out_channels, zero_bias=True, zero_weights=False, groups=1, scaled=False):
+    return get_conv(in_channels, out_channels, 1, 1, 0, zero_bias, zero_weights, groups=groups, scaled=scaled)
 
 
 def parse_layer_string(s):
@@ -96,6 +137,13 @@ def draw_gaussian_diag_samples_std(mu, sigma):
     return sigma * eps + mu
 
 
+def softclip(tensor, min=-8):
+    """ Clips the tensor values at the minimum value min in a softway. Taken from Handful of Trials """
+    result_tensor = min + F.softplus(tensor - min)
+
+    return result_tensor
+
+
 class bottom_up(HModule):
     def build(self):
         H = self.H
@@ -103,10 +151,13 @@ class bottom_up(HModule):
         self.widths = get_width_settings(H.width, H.custom_width_str)
         enc_blocks = []
         blockstr = parse_layer_string(H.enc_blocks)
-        # res means resolution ?
-        for res, output_size in blockstr: 
+        
+        for res, down_rate in blockstr: 
             use_3x1 = res > 2  # Don't use 3x1s for 1x1, 2x1 patches
-            enc_blocks.append(Block(self.widths[res], int(self.widths[res] * H.bottleneck_multiple), self.widths[res], down_rate=output_size, residual=True, use_3x1=use_3x1))
+            pool = None
+            if down_rate is not None:
+                pool = PoolLayer(self.widths[res], self.widths[res], res, down_rate)
+            enc_blocks.append(Block(self.widths[res], int(self.widths[res] * H.bottleneck_multiple), self.widths[res], down_rate=down_rate, residual=True, use_3x1=use_3x1, pool=pool))
         n_blocks = len(blockstr)
         for b in enc_blocks:
             b.c4.weight.data *= np.sqrt(1 / n_blocks)
@@ -141,8 +192,8 @@ class DecBlock(nn.Module):
         cond_width = int(width * H.bottleneck_multiple)
         
         if self.mixin is not None:
-            scale_factor = math.ceil(self.base / self.mixin)
-            self.unpool = nn.ConvTranspose1d(width, width, scale_factor, scale_factor, 0)
+            self.unpool = Unpoolayer(width, width, res, mixin)
+            
         
         self.zdim = H.zdim
         
@@ -157,7 +208,6 @@ class DecBlock(nn.Module):
         self.z_fn = lambda x: self.z_proj(x)
         
         self.softplus = torch.nn.Softplus(beta=H.gradient_smoothing_beta)
-        self.distribution = None
 
     def sample(self, x, acts):
         # print(f'x {x.shape} acts {acts.shape}')
@@ -169,17 +219,18 @@ class DecBlock(nn.Module):
         xpp = feats[:, self.zdim * 2:, ...] # xpp is a tensor used to modify x in the next step.                                                                                              
         x = x + xpp
         
-        # z = draw_gaussian_diag_samples(qm, qv)
-        # kl = gaussian_analytical_kl(qm, pm, qv, pv)
-        # self.distribution = D.Normal(qm, torch.exp(qv))
+        qv = softclip(qv)
+        pv = softclip(pv)
+        z = draw_gaussian_diag_samples(qm, qv)
+        kl = gaussian_analytical_kl(qm, pm, qv, pv)
+       
+        # qv = self.softplus(qv)
+        # pv = self.softplus(pv)
+        # z = draw_gaussian_diag_samples_std(qm, qv)
+        # kl = gaussian_analytical_kl_std(qm, pm, qv, pv)
+        # self.distribution = D.Normal(qm, qv)
         
-        qv = self.softplus(qv)
-        pv = self.softplus(pv)
-        z = draw_gaussian_diag_samples_std(qm, qv)
-        kl = gaussian_analytical_kl_std(qm, pm, qv, pv)
-        self.distribution = D.Normal(qm, qv)
-        
-        return z, x, kl
+        return z, x, kl, qm, qv
 
     def sample_uncond(self, x, t=None, lvs=None):
         n, c, h, w = x.shape
@@ -212,16 +263,16 @@ class DecBlock(nn.Module):
         # print(f'x {x.shape}')
         if self.mixin is not None:
             # print(f'x unpool {self.unpool(xs[self.mixin][:, :x.shape[1], ...]).shape}')
-            x = x + self.unpool(xs[self.mixin][:, :x.shape[1], ...])[:, :, :x.shape[2]]
+            x = x + self.unpool(xs[self.mixin][:, :x.shape[1], ...])
             # print(f'x unpool {x.shape}')
-        z, x, kl = self.sample(x, acts)
+        z, x, kl, qm, qv = self.sample(x, acts)
         x = x + self.z_fn(z)
         x = self.resnet(x)
-        xs[self.base] = x # xs means x_sample :)
+        xs[self.base] = x 
         
         if get_latents:
-            return xs, dict(z=z.detach(), kl=kl)
-        return xs, dict(kl=kl)
+            return xs, dict(z=z.detach(), kl=kl, qm=qm, qv=qv)
+        return xs, dict(kl=kl, qm=qm, qv=qv)
 
     def forward_uncond(self, xs, t=None, lvs=None):
         try:
@@ -260,7 +311,7 @@ class top_down(HModule):
         
         # self.gain = nn.Parameter(torch.ones(1, H.width, 1))
         # self.bias = nn.Parameter(torch.zeros(1, H.width, 1))
-        # self.final_fn = lambda x: x * self.gain + self.bias # mu and var?
+        # self.final_fn = lambda x: x * self.gain + self.bias 
 
     def forward(self, activations, get_latents=False):
         stats = []
@@ -269,7 +320,9 @@ class top_down(HModule):
         for block in self.dec_blocks:
             xs, block_stats = block(xs, activations, get_latents=get_latents)
             stats.append(block_stats)
+        # print(f'xs : {xs[self.H.image_size]}')
         # xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        # print(f'xs_final : {xs[self.H.image_size]}')
         return xs[self.H.image_size], stats
 
     def forward_uncond(self, n, t=None, y=None):
@@ -303,22 +356,34 @@ class VAE(HModule):
     def forward(self, x, x_target):
         # x : [batch_size, channels, length] or [batch_size, channels, height, width]
         activations = self.encoder.forward(x)
-        _, stats = self.decoder.forward(activations)
+        pred_x, stats = self.decoder.forward(activations)
         
-        z_L_distribution = self.decoder.dec_blocks[-1].distribution
+        posterior_mu = stats[-1]['qm']
+        # posterior_mu = self.decoder.out_net(posterior_mu)
+        posterior_logstd = stats[-1]['qv']
+        # posterior_logstd = self.decoder.out_net(posterior_logstd)
         
-        # rl = self.decoder.out_net.nll(px_z, x_target, self.decoder.gain).mean(dim=(1,2))
-        # rl = self.decoder.out_net.gaussian_nll(px_z, self.decoder.bias, self.decoder.gain).mean(dim=(1,2))
-        ll = self.decoder.out_net.ll(x, z_L_distribution)
+        # print(f'posterior_mu {posterior_mu} {posterior_mu.shape}')
+        # print(f'posterior_std {torch.exp(posterior_logstd)} {posterior_logstd.shape}')
         
-        kl_dist = torch.zeros_like(ll) 
+        if self.H.out_net_mode == 'gaussian':
+            nll = self.decoder.out_net.gaussian_nll(x, posterior_mu, posterior_logstd, self.H.std_mode).sum(dim=(1,2))
+        elif self.H.out_net_mode == 'mse':
+            nll = self.decoder.out_net.mse_nll(x, posterior_mu, posterior_logstd, pred_x, self.H.mse_mode).sum(dim=(1,2))
+        else:
+            raise NotImplementedError
+        
+        kl_dist = torch.zeros_like(nll) 
+        kl_list = []
         
         for statdict in stats:
             # print(statdict['kl'].shape)
+            kl_list.append(statdict['kl'].sum(dim=(1,2)).mean())
             kl_dist += statdict['kl'].sum(dim=(1,2))
         
-        nelbo = (-ll + kl_dist).mean()
-        return dict(nelbo=nelbo, recon=ll.mean(), kl_dist=kl_dist.mean()) 
+        # nelbo = (ll + kl_dist).mean()
+        nelbo = (nll + kl_dist).mean()
+        return dict(nelbo=nelbo, recon=-nll.mean(), kl_dist=kl_dist.mean()), kl_list
 
     def forward_get_latents(self, x):
         activations = self.encoder.forward(x)
@@ -333,77 +398,110 @@ class VAE(HModule):
         px_z = self.decoder.forward_manual_latents(n_batch, latents, t=t)
         return self.decoder.out_net.sample(px_z)
     
+    def forward_samples(self, n_batch, x):
+        activations = self.encoder.forward(x)
+        pred_x, stats = self.decoder.forward(activations)
+        posterior_mu = stats[-1]['qm']
+        posterior_logstd = stats[-1]['qv']
+        
+        return self.decoder.out_net.sample(x, posterior_mu, posterior_logstd, pred_x)
+    
     def elbo(self, x):
-        # print(f'x {x} {x.shape}')
+        # print(f'x {x[0]} {x.shape}')
         activations = self.encoder.forward(x)
         # print(activations.keys())
-        _, stats = self.decoder.forward(activations)
+        pred_x, stats = self.decoder.forward(activations)
         
-        z_L_distribution = self.decoder.dec_blocks[-1].distribution
+        # z_L_distribution = self.decoder.dec_blocks[-1].distribution
+        posterior_mu = stats[-1]['qm']
+        posterior_logstd = stats[-1]['qv']
         
-        ll = self.decoder.out_net.ll(x, z_L_distribution)
-        # print(f'll {ll} {ll.shape}')
-        x_rec = self.decoder.out_net.sample(z_L_distribution)
-        # print(f'x_rec {x_rec} {x_rec.shape}')
+        if self.H.out_net_mode == 'gaussian':
+            nll = self.decoder.out_net.gaussian_nll(x, posterior_mu, posterior_logstd, self.H.std_mode).sum(dim=(1,2))
+        elif self.H.out_net_mode == 'mse':
+            nll = self.decoder.out_net.mse_nll(x, posterior_mu, posterior_logstd, pred_x, self.H.mse_mode).sum(dim=(1,2))
+        else:
+            raise NotImplementedError
         
-        kl_divergence = torch.zeros_like(ll) # rate_per_pixel
+        kl_dist = torch.zeros_like(nll) 
+        kl_list = []
         
         for statdict in stats:
             # print(statdict['kl'].shape)
-            kl_divergence += statdict['kl'].sum(dim=(1,2))
+            kl_dist += statdict['kl'].sum(dim=(1,2))
         
-        elbo = (ll - kl_divergence)
+        elbo = (-nll - kl_dist)
         return elbo
-    
-    
-    # def importance_sampling(self, x, k=1):
-    #     activations = self.encoder.forward(x)
-    #     px_z, stats = self.decoder.forward(activations)
-    #     lls = []
-    #     for i in range(k):
-    #         ll = -1 * self.decoder.out_net.gaussian_nll(x, self.decoder.bias, self.decoder.gain).sum(dim=1)
-    #         ll -= standard_gaussian_nll(z, dim=1)
-    #         ll += gaussian_nll(z, mu=mu_enc, ln_var=ln_var_enc, dim=1)
-    #         lls.append(ll[:, None])
 
-    #     return torch.cat(lls, dim=1).logsumexp(dim=1) - math.log(k)
 
 class OutPutNet(nn.Module):
-    '''
-    Adapted from https://github.com/JakobHavtorn/hvae-oodd/blob/main/oodd/layers/likelihoods.py
-    '''
+    
     def __init__(self, H):
         super().__init__()
         self.H = H
         self.width = H.width
-        self.std_activation = nn.Softplus(beta=0.6931472) # ln(2) ~= 0.6931472.
-        self.out_conv = get_3x1(H.width * 2, H.image_channels * 2) # because of the self.in_conv = get_3x1(H.image_channels, H.width) in encoder
+        self.std_activation = nn.Softplus(beta=H.gradient_smoothing_beta) # ln(2) ~= 0.6931472.
+        self.out_mu_logstd = get_3x1(H.width * 2, H.image_channels * 2) # because of the self.in_conv = get_3x1(H.image_channels, H.width) in encoder
+        self.out_recon = get_3x1(H.width, H.image_channels)
 
-    def ll(self, x, distribution):
-        mu, var = self.forward(distribution)
-        # print(f' mu: {mu} std {var}')
+    def gaussian_nll(self, x, posterior_mu, posterior_logstd, std_mode):
+        mu, logstd = self.out_mu_logstd(torch.cat([posterior_mu, posterior_logstd], dim=1)).chunk(2, dim=1)
+        if std_mode == 'learned':
+            logstd = softclip(logstd)
+            return 0.5 * torch.pow((x - mu) / logstd.exp(), 2) + logstd + 0.5 * np.log(2 * np.pi)
         
-        # mse
-        log_likelihood = D.Normal(mu, var).log_prob(x).sum((1,2))
+        elif std_mode == 'global':
+            std = self.H.prior_std
+            return 0.5 * torch.pow((x - mu) / std, 2) + torch.log(std) + 0.5 * np.log(2 * np.pi)
         
-        return log_likelihood
-    
-    def gaussian_nll(self, x, mu, ln_var):
-        prec = torch.exp(-2 * ln_var)
-        x_diff = x - mu
-        x_power = (x_diff * x_diff) * prec * 0.5
-        return (2 * ln_var + math.log(2 * torch.pi)) * 0.5 + x_power
+        elif std_mode == 'batch':
+            logstd = ((x - mu) ** 2).mean([0], keepdim=True).sqrt().log() 
+            logstd = softclip(logstd)
 
-    def forward(self, distribution):
-        # print(f'mean {distribution.mean.shape}')
-        mu, var = self.out_conv(torch.cat([distribution.mean, distribution.stddev], dim=1)).chunk(2, dim=1)
-        # _, var = logstd_downbounded(var, torch.tensor(self.H.min_std_value, device=var.device, dtype=var.dtype))
-        var = self.std_activation(var)
+            return 0.5 * torch.pow((x - mu) / logstd.exp(), 2) + logstd + 0.5 * np.log(2 * np.pi)
         
-        return mu, var
+        else:
+            raise NotImplementedError
+
+    def mse_nll(self, x, loc, logscale, pred_x, mse_mode):
+        mu, logstd = self.out_mu_logstd(torch.cat([loc, logscale], dim=1)).chunk(2, dim=1)
+        # print(f' mu: {mu[0]} std {torch.exp(logstd)[0]}')
+        logstd = softclip(logstd)
+        pred_x = self.out_recon(pred_x)
+        # print(f'pred_x {pred_x}')
+        
+        crit = torch.nn.MSELoss(reduction='none')
+        mse = crit(pred_x, x)
+        if mse_mode == 'pure':
+            return mse
+        
+        elif mse_mode == 'guassian':
+            inv_std = torch.exp(-logstd)
+            return 0.5 * torch.pow(inv_std, 2) * mse + 0.5 * np.log(2 * torch.pi) + logstd 
+        
+        elif mse_mode == 'sigma':
+            return 0.5 * torch.log(2 * torch.pi * mse) + 0.5
+        
+        else:
+            raise NotImplementedError
     
-    def sample(self, distribution):
-        mu, var = self.forward(distribution)
-        # print(f' mu: {mu} std {var}')
+    def forward(self, pred_x):
+        xhat = self.out_recon(pred_x)
+        return xhat
+    
+    def sample(self, x, loc, logscale, pred_x):
+        with torch.no_grad():
+            mu, logstd = self.out_mu_logstd(torch.cat([loc, logscale], dim=1)).chunk(2, dim=1)
+            pred_x = self.out_recon(pred_x)
+            
+            print(f' mu: {mu} std {torch.exp(logstd)}')
+            
+            eps = torch.empty_like(mu).normal_(0., 1.)
+            sample_pred_x = torch.exp(logstd) * eps + mu
+            
+        return dict(pred_x=pred_x, sample_pred_x=sample_pred_x)
+    
+    def calibrated_sample(self, posterior_mu):
+        mu = self.out_conv(posterior_mu) 
         eps = torch.empty_like(mu).normal_(0., 1.)
-        return var * eps + mu
+        return torch.exp(self.log_sigma) * eps + mu

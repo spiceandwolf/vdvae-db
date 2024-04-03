@@ -16,21 +16,23 @@ power = Hyperparams()
 power.width = 7
 # power.lr = 0.00001
 power.zdim = 7
-power.wd = 0.01
+power.wd = 0.
 # power.dec_blocks = "1x1,4m1,4x1,7m4,7x1" # x corresponds to residual block, m corresponds to unpool layer
 # power.enc_blocks = "7x1,7d2,4x1,4d4,1x1" # x corresponds to residual block, d corresponds to pool layer
-power.warmup_iters = 15
+power.warmup_iters = 1600
 power.dataset = 'power'
-power.n_batch = 1024
+power.n_batch = 512
 power.ema_rate = 0.9999
 power.data_root = '/home/user1/QOlab/dataset/'
-# power.num_epochs = 60
+power.num_epochs = 40
 power.desc = 'power_test'
 power.epochs_per_eval = 5
 power.epochs_per_eval_save = 5
-power.skip_threshold = 800.
-power.grad_clip = 300
+power.skip_threshold = 100000.
+power.grad_clip = 30000
 power.noise_value = '0.0005, 0.0005, 0.005, 0.05, 0.5, 0.5, 0.5'
+power.decay_iters = 80000
+power.decay_start = 1600
 HPARAMS_REGISTRY['power'] = power
 
 
@@ -159,6 +161,7 @@ def add_vae_arguments(parser):
     parser.add_argument('--grad_clip', type=float, default=200.0)
     parser.add_argument('--skip_threshold', type=float, default=400.0)
     parser.add_argument('--lr', type=float, default=0.00015)
+    parser.add_argument('--min_lr', type=float, default=1e-6)
     parser.add_argument('--lr_prior', type=float, default=0.00015)
     parser.add_argument('--wd', type=float, default=0.0)
     parser.add_argument('--wd_prior', type=float, default=0.0)
@@ -182,9 +185,15 @@ def add_vae_arguments(parser):
     
     parser.add_argument('--test_name', type=str, default=None)
     parser.add_argument('--noise_value', type=str, default=None)
-    parser.add_argument('--add_noise', type=bool, default=False)
-    parser.add_argument('--noise_type', type=str, default='gaussian')
+    parser.add_argument('--noise_type', type=str, default='None')
     parser.add_argument('--raw_data', type=bool, default=False)
     parser.add_argument('--gradient_smoothing_beta', type=float, default=0.6931472)
+    parser.add_argument('--last_epoch', type=int, default=-1)
+    parser.add_argument('--decay_iters', type=int, default=0)
+    parser.add_argument('--decay_start', type=int, default=0)
+    parser.add_argument('--prior_std', type=int, default=0)
+    parser.add_argument('--out_net_mode', type=str, default='')
+    parser.add_argument('--mse_mode', type=str, default='')
+    parser.add_argument('--std_mode', type=str, default='')
     
     return parser

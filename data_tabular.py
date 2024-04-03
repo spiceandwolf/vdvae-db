@@ -1,7 +1,5 @@
 import numpy as np
-import pickle
 import os
-from sklearn.preprocessing import StandardScaler
 import torch
 from torch.utils.data import TensorDataset
 
@@ -15,8 +13,7 @@ def set_up_data(H):
         trX, vaX, teX, data_max_, data_min_ = power(H.data_root)
         H.image_size = 7
         H.image_channels = 1
-        shift = H.pad_value
-        scale = 1. 
+        shift = H.pad_value 
     else:
         raise ValueError('unknown dataset: ', H.dataset)
 
@@ -29,13 +26,12 @@ def set_up_data(H):
     shift = torch.tensor(H.pad_value).cuda().view(1, 1, H.width)
     data_max_ = torch.tensor(data_max_).cuda().view(1, 1, H.width)
     data_min_ = torch.tensor(data_min_).cuda().view(1, 1, H.width)
-    data_max_ = data_max_ + 2 * shift 
-    data_min_ = data_min_ - 2 * shift
+    H.prior_std = shift / 3 / (data_max_ - data_min_)
+    # print(f'prior_std {H.prior_std}')
 
     train_data = TensorDataset(torch.as_tensor(trX))
     valid_data = TensorDataset(torch.as_tensor(eval_dataset))
     untranspose = False
-    add_noise = H.add_noise
     noise_type = H.noise_type
     is_raw_data = H.raw_data
 
@@ -53,13 +49,30 @@ def set_up_data(H):
         inp = x[0].cuda(non_blocking=True).float()
         out = inp.clone()
         # print(f'noise {noise}')
+        scale = 0
         
-        if add_noise:
-            if noise_type == 'uniform':
-                noise = torch.empty_like(inp).uniform_(-1, 1) 
-            elif noise_type == 'gaussian':
-                noise = torch.empty_like(inp).normal_(0, 1 / 3) 
-            out = out + noise * shift
+        if noise_type == 'uniform':
+            '''
+            bin = 2 * shift
+            [a, a + bin)
+            domian : [data_min_, data_max_ + bin)
+            '''
+            scale = torch.empty_like(inp).uniform_(0, 1) * 2
+            data_max_ = data_max_ + 2 * shift
+        elif noise_type == 'gaussian':
+            '''
+            (a - shift, a + shift)
+            bin = 2 * shift
+            domian : (data_min_ - bin, data_max_ + bin)
+            '''
+            scale = torch.empty_like(inp).normal_(0, 1 / 3) 
+            data_max_ = data_max_ + 2 * shift 
+            data_min_ = data_min_ - 2 * shift
+        elif noise_type == 'None':
+            scale = torch.zeros_like(inp)
+            
+        out = out + scale * shift
+            
         # print(f'out {out}')
         if is_raw_data != True:
             out = (out - data_min_) / (data_max_ - data_min_)
@@ -84,9 +97,8 @@ def power(data_root):
     data_max_ = trX.max(axis=0) 
     data_min_ = trX.min(axis=0) 
     np.random.seed(42)
-    tr_va_split_indices = np.random.permutation(trX.shape[0])
-    split_index = int(trX.shape[0] * 0.1)
-    test = trX[tr_va_split_indices[:split_index]].reshape(-1, 1, 7)
-    valid = trX[tr_va_split_indices[split_index:2*split_index]].reshape(-1, 1, 7)
-    train = trX[tr_va_split_indices[2*split_index:]].reshape(-1, 1, 7)
+    tr_va = np.random.permutation(trX.shape[0])
+    test = trX[tr_va].reshape(-1, 1, 7)
+    valid = test
+    train = test
     return train, valid, test, data_max_, data_min_
