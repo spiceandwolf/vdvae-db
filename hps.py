@@ -19,20 +19,20 @@ power.zdim = 7
 power.wd = 0.
 # power.dec_blocks = "1x1,4m1,4x1,7m4,7x1" # x corresponds to residual block, m corresponds to unpool layer
 # power.enc_blocks = "7x1,7d2,4x1,4d4,1x1" # x corresponds to residual block, d corresponds to pool layer
-power.warmup_iters = 1600
+power.warmup_iters = 600
 power.dataset = 'power'
-power.n_batch = 512
+power.n_batch = 8192
 power.ema_rate = 0.9999
 power.data_root = '/home/user1/QOlab/dataset/'
-power.num_epochs = 40
+power.num_epochs = 80
 power.desc = 'power_test'
 power.epochs_per_eval = 5
 power.epochs_per_eval_save = 5
 power.skip_threshold = 100000.
 power.grad_clip = 30000
 power.noise_value = '0.0005, 0.0005, 0.005, 0.05, 0.5, 0.5, 0.5'
-power.decay_iters = 80000
-power.decay_start = 1600
+power.decay_iters = 17000
+power.decay_start = 1700
 HPARAMS_REGISTRY['power'] = power
 
 

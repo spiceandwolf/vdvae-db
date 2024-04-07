@@ -21,7 +21,7 @@ def training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, ite
     vae.zero_grad()
     stats, kl_list = vae.forward(data_input, target)
     stats['nelbo'].backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), H.grad_clip).item()
+    grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), H.grad_clip, 'inf').item()
     recon_nans = torch.isnan(stats['recon']).sum()
     kl_dist_nans = torch.isnan(stats['kl_dist']).sum()
     stats.update(dict(kl_dist_nans=0 if kl_dist_nans == 0 else 1, recon_nans=0 if recon_nans == 0 else 1))
@@ -53,6 +53,7 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
     stats = []
     iters_since_starting = 0
     H.ema_rate = torch.as_tensor(H.ema_rate).cuda()
+    best_score = torch.inf
     for epoch in range(starting_epoch, H.num_epochs):
         train_sampler.set_epoch(epoch)
         for x in DataLoader(data_train, batch_size=H.n_batch, drop_last=True, pin_memory=True, sampler=train_sampler):
@@ -61,18 +62,11 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
             stats.append(training_stats)
             # scheduler.step() # `optimizer.step()`should be called before `lr_scheduler.step()`.
             if iterate % H.iters_per_print == 0 or iters_since_starting in early_evals:
+                # logprint(model=H.desc, type='train_loss', lr=scheduler.get_last_lr()[0], epoch=epoch, step=iterate, **accumulate_stats(stats, H.iters_per_print))
                 logprint(model=H.desc, type='train_loss', lr=scheduler.get_last_lr()[0].item(), epoch=epoch, step=iterate, **accumulate_stats(stats, H.iters_per_print))
-            '''
-            if iterate % H.iters_per_images == 0 or (iters_since_starting in early_evals and H.dataset != 'ffhq_1024') and H.rank == 0:
-                write_images(H, ema_vae, viz_batch_original, viz_batch_processed, f'{H.save_dir}/samples-{iterate}.png', logprint)
-            '''
+            
             iterate += 1
             iters_since_starting += 1
-            
-            # if training_stats['nelbo'] < -10:
-            #     vae.decoder.out_net.std = H.prior_std
-            #     vae.decoder.out_net.frozen = True
-            #     logprint(f'freeze std to {H.prior_std}')
             
             if iterate % H.iters_per_save == 0 and H.rank == 0:
                 if np.isfinite(stats[-1]['nelbo']):
@@ -83,21 +77,25 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
 
             # if iterate % H.iters_per_ckpt == 0 and H.rank == 0:
             #     save_model(os.path.join(H.save_dir, f'iter-{iterate}'), vae, ema_vae, optimizer, H)
+                
             # break
 
         if epoch % H.epochs_per_eval == 0:
             valid_stats = evaluate(H, ema_vae, data_valid, preprocess_fn)
-            fp = os.path.join(H.save_dir, f'epoch-{epoch}')
             logprint(model=H.desc, type='eval_loss', epoch=epoch, step=iterate, **valid_stats)
-            logprint(f'Saving model@epoch-{epoch} to {fp}')
-            save_model(fp, vae, ema_vae, optimizer, H)
             writer.add_scalar('eval_nelbo', valid_stats['filtered_nelbo'], epoch)
+            if np.isfinite(valid_stats['filtered_nelbo']) and best_score >= valid_stats['mse']:
+                best_score = valid_stats['mse']
+                fp = os.path.join(H.save_dir, f'best')
+                logprint(f'Saving model@epoch-{epoch} to {fp}')
+                save_model(fp, vae, ema_vae, optimizer, H)
             
             # run_test_integrate(H, ema_vae, logprint)
             
         writer.add_scalar('train_recon', training_stats['recon'], epoch)
         writer.add_scalar('train_kl', training_stats['kl_dist'], epoch)
         writer.add_scalar('train_nelbo', training_stats['nelbo'], epoch)
+        writer.add_scalar('train_mse', training_stats['mse'], epoch)
         
         for i, kl in enumerate(kl_list):
             writer.add_scalar(f'train_layer_{i}_kl', kl, epoch)
@@ -115,7 +113,7 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
 def evaluate(H, ema_vae, data_valid, preprocess_fn):
     stats_valid = []
     valid_sampler = DistributedSampler(data_valid, num_replicas=H.mpi_size, rank=H.rank)
-    for x in DataLoader(data_valid, batch_size=H.n_batch*100, drop_last=True, pin_memory=True, sampler=valid_sampler):
+    for x in DataLoader(data_valid, batch_size=H.n_batch*10, drop_last=True, pin_memory=True, sampler=valid_sampler):
         target, data_input = preprocess_fn(x)
         validing_stat = eval_step(data_input, target, ema_vae)
         stats_valid.append(validing_stat)
@@ -148,13 +146,9 @@ def run_test_eval(H, ema_vae, data_test, preprocess_fn, logprint):
     logprint(type='test_loss', **stats)
 
 
-def run_query_test_eval(H, ema_vae, pad_value, logprint):
+def run_query_test_eval(H, ema_vae, table_data, pad_value, logprint):
     print('evaluating')
-    data_root = '~/QOlab/dataset/'
-    table_data = pd.read_csv(os.path.join(data_root, 'household_power_consumption.txt'), delimiter=';', 
-                               usecols=[2,3,4,5,6,7,8], na_values=[' ', '?'])
-    table_data = table_data.dropna(axis=0, how='any')
-    n_rows = table_data.shape[0]
+    n_rows = table_data.shape[0] - int(table_data.shape[0] * 0.1) 
     
     qerrors = []
     dim = H.width
@@ -166,7 +160,7 @@ def run_query_test_eval(H, ema_vae, pad_value, logprint):
     # Test
     for i in range(3000):
         
-        cols, ops, vals = GenerateQuery(table_data.columns, rng, table_data)
+        cols, ops, vals = GenerateQuery(table_data.columns, rng, table_data[int(table_data.shape[0] * 0.1):])
         true_card = Card(table_data, cols, ops, vals)
         predicates = []
         for c, o, v in zip(cols, ops, vals):
@@ -268,10 +262,8 @@ def run_test_reconstruct(H, model, data_valid_or_test, preprocess_fn, logprint):
 
 def main():
     H, logprint = set_up_hyperparams()
-    H, data_train, data_valid_or_test, preprocess_fn = set_up_data(H)
+    H, data_train, data_valid_or_test, preprocess_fn, original_data = set_up_data(H)
     vae, ema_vae = load_vaes(H, logprint)
-    
-    noise = {"Global_active_power": 0.0005, "Global_reactive_power": 0.0005, "Voltage": 0.005, "Global_intensity": 0.05, "Sub_metering_1": 0.5, "Sub_metering_2": 0.5, "Sub_metering_3": 0.5}
     
     # data = select_n_random(data_train, labels=None, n=4)
     
@@ -290,7 +282,7 @@ def main():
     if H.test_eval:
         vae = vae.module
         # run_test_eval(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
-        run_query_test_eval(H, ema_vae, H.pad_value, logprint)
+        run_query_test_eval(H, ema_vae, original_data, H.pad_value, logprint)
         # run_test_integrate(H, ema_vae, logprint)
         # run_test_reconstruct(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
         '''  
@@ -315,7 +307,7 @@ def main():
         train_loop(H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint, writer)
         writer.close()
         # run_test_integrate(H, ema_vae, logprint)
-        run_query_test_eval(H, ema_vae, H.pad_value, logprint)
+        run_query_test_eval(H, ema_vae, original_data, H.pad_value, logprint)
         
 
 if __name__ == "__main__":

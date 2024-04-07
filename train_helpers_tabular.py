@@ -16,6 +16,7 @@ from data import mkdir_p
 from contextlib import contextmanager
 import torch.distributed as dist
 from apex.optimizers import FusedAdam as AdamW
+from torch.optim import Adamax
 from vae_tabular import VAE
 from torch.nn.parallel.distributed import DistributedDataParallel
 
@@ -178,7 +179,8 @@ def load_vaes(H, logprint):
 
 
 def load_opt(H, vae, logprint):
-    optimizer = AdamW(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2))
+    # optimizer = AdamW(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2))
+    optimizer = Adamax(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2), foreach=False)
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
     scheduler = NarrowCosineDecay(optimizer, decay_steps=H.decay_iters, decay_start=H.decay_start, minimum_learning_rate=H.min_lr, last_epoch=H.last_epoch, warmup_steps=H.warmup_iters)
 

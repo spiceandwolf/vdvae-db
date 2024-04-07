@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import pandas as pd
 import torch
 from torch.utils.data import TensorDataset
 
@@ -10,7 +11,7 @@ def set_up_data(H):
         if H.noise_value is not None:
             for i, ss in enumerate(H.noise_value.split(',')):
                 H.pad_value[i] = float(ss)
-        trX, vaX, teX, data_max_, data_min_ = power(H.data_root)
+        trX, vaX, teX, original_data = power(H.data_root)
         H.image_size = 7
         H.image_channels = 1
         shift = H.pad_value 
@@ -24,10 +25,10 @@ def set_up_data(H):
         eval_dataset = vaX
 
     shift = torch.tensor(H.pad_value).cuda().view(1, 1, H.width)
-    data_max_ = torch.tensor(data_max_).cuda().view(1, 1, H.width)
-    data_min_ = torch.tensor(data_min_).cuda().view(1, 1, H.width)
-    H.prior_std = shift / 3 / (data_max_ - data_min_)
-    # print(f'prior_std {H.prior_std}')
+    data_max_ = torch.tensor(original_data.max(axis=0)).cuda().view(1, 1, H.width)
+    data_min_ = torch.tensor(original_data.min(axis=0)).cuda().view(1, 1, H.width)
+    H.prior_std = (shift / 3 / (data_max_ - data_min_)).float()
+    print(f'prior_std {H.prior_std}')
 
     train_data = TensorDataset(torch.as_tensor(trX))
     valid_data = TensorDataset(torch.as_tensor(eval_dataset))
@@ -79,7 +80,7 @@ def set_up_data(H):
         
         return inp.float(), out.float()
 
-    return H, train_data, valid_data, preprocess_func
+    return H, train_data, valid_data, preprocess_func, original_data
 
 
 def mkdir_p(path):
@@ -91,14 +92,12 @@ def flatten(outer):
 
 
 def power(data_root):
-    trX = np.genfromtxt(os.path.join(data_root, 'household_power_consumption.txt'), skip_header=0, delimiter=';', usecols=[2,3,4,5,6,7,8], missing_values={' ', '?'}, filling_values=np.nan)
-    trX = trX[~np.isnan(trX).any(axis=1)]
+    trX = pd.read_csv(os.path.join(data_root, 'household_power_consumption.txt'), delimiter=';', usecols=[2,3,4,5,6,7,8], na_values=[' ', '?'])      
+    trX = trX.dropna(axis=0, how='any')
+    trX = trX.sample(frac=1).reset_index(drop=True)
     
-    data_max_ = trX.max(axis=0) 
-    data_min_ = trX.min(axis=0) 
-    np.random.seed(42)
-    tr_va = np.random.permutation(trX.shape[0])
-    test = trX[tr_va].reshape(-1, 1, 7)
+    split_index = int(trX.shape[0] * 0.1)
+    test = trX[:split_index].values.reshape(-1, 1, 7)
     valid = test
-    train = test
-    return train, valid, test, data_max_, data_min_
+    train = trX[split_index:].values.reshape(-1, 1, 7)
+    return train, valid, test, trX

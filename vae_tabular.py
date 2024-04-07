@@ -74,6 +74,7 @@ class Unpoolayer(nn.Module):
     
 def get_conv(in_channels, out_channels, kernel_size, stride, padding, zero_bias=True, zero_weights=False, groups=1, scaled=False):
     c = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, groups=groups)
+    nn.init.xavier_uniform_(c.weight)
     if zero_bias:
         c.bias.data *= 0.0
     if zero_weights:
@@ -208,6 +209,7 @@ class DecBlock(nn.Module):
         self.z_fn = lambda x: self.z_proj(x)
         
         self.softplus = torch.nn.Softplus(beta=H.gradient_smoothing_beta)
+        self.gradient_smoothing_beta = H.gradient_smoothing_beta
 
     def sample(self, x, acts):
         # print(f'x {x.shape} acts {acts.shape}')
@@ -219,8 +221,8 @@ class DecBlock(nn.Module):
         xpp = feats[:, self.zdim * 2:, ...] # xpp is a tensor used to modify x in the next step.                                                                                              
         x = x + xpp
         
-        qv = softclip(qv)
-        pv = softclip(pv)
+        qv = softclip(qv) * self.gradient_smoothing_beta
+        pv = softclip(pv) * self.gradient_smoothing_beta
         z = draw_gaussian_diag_samples(qm, qv)
         kl = gaussian_analytical_kl(qm, pm, qv, pv)
        
@@ -367,12 +369,14 @@ class VAE(HModule):
         # print(f'posterior_std {torch.exp(posterior_logstd)} {posterior_logstd.shape}')
         
         if self.H.out_net_mode == 'gaussian':
-            nll = self.decoder.out_net.gaussian_nll(x, posterior_mu, posterior_logstd, self.H.std_mode).sum(dim=(1,2))
+            out_dict = self.decoder.out_net.gaussian_nll(x, posterior_mu, posterior_logstd, self.H.std_mode)
         elif self.H.out_net_mode == 'mse':
-            nll = self.decoder.out_net.mse_nll(x, posterior_mu, posterior_logstd, pred_x, self.H.mse_mode).sum(dim=(1,2))
+            out_dict = self.decoder.out_net.mse_nll(x, posterior_mu, posterior_logstd, pred_x, self.H.mse_mode)
         else:
             raise NotImplementedError
         
+        nll = out_dict['nll'].sum(dim=(1,2))
+        mse = out_dict['mse'].sum(dim=(1,2))
         kl_dist = torch.zeros_like(nll) 
         kl_list = []
         
@@ -382,8 +386,8 @@ class VAE(HModule):
             kl_dist += statdict['kl'].sum(dim=(1,2))
         
         # nelbo = (ll + kl_dist).mean()
-        nelbo = (nll + kl_dist).mean()
-        return dict(nelbo=nelbo, recon=-nll.mean(), kl_dist=kl_dist.mean()), kl_list
+        nelbo = (nll + kl_dist)
+        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl_dist.mean(), mse=mse.mean()), kl_list
 
     def forward_get_latents(self, x):
         activations = self.encoder.forward(x)
@@ -417,11 +421,14 @@ class VAE(HModule):
         posterior_logstd = stats[-1]['qv']
         
         if self.H.out_net_mode == 'gaussian':
-            nll = self.decoder.out_net.gaussian_nll(x, posterior_mu, posterior_logstd, self.H.std_mode).sum(dim=(1,2))
+            out_dict = self.decoder.out_net.gaussian_nll(x, posterior_mu, posterior_logstd, self.H.std_mode)
         elif self.H.out_net_mode == 'mse':
-            nll = self.decoder.out_net.mse_nll(x, posterior_mu, posterior_logstd, pred_x, self.H.mse_mode).sum(dim=(1,2))
+            out_dict = self.decoder.out_net.mse_nll(x, posterior_mu, posterior_logstd, pred_x, self.H.mse_mode)
         else:
             raise NotImplementedError
+        
+        nll = out_dict['nll'].sum(dim=(1,2))
+        mse = out_dict['mse'].sum(dim=(1,2))
         
         kl_dist = torch.zeros_like(nll) 
         kl_list = []
@@ -448,17 +455,23 @@ class OutPutNet(nn.Module):
         mu, logstd = self.out_mu_logstd(torch.cat([posterior_mu, posterior_logstd], dim=1)).chunk(2, dim=1)
         if std_mode == 'learned':
             logstd = softclip(logstd)
-            return 0.5 * torch.pow((x - mu) / logstd.exp(), 2) + logstd + 0.5 * np.log(2 * np.pi)
+            mse = 0.5 * torch.pow((x - mu) / logstd.exp(), 2)
+            nll = mse + logstd + 0.5 * np.log(2 * np.pi)
+            return dict(nll=nll, mse=mse) 
         
         elif std_mode == 'global':
             std = self.H.prior_std
-            return 0.5 * torch.pow((x - mu) / std, 2) + torch.log(std) + 0.5 * np.log(2 * np.pi)
+            mse = 0.5 * torch.pow((x - mu) / std, 2)
+            nll = mse + torch.log(std) + 0.5 * np.log(2 * np.pi)
+            return dict(nll=nll, mse=mse) 
         
         elif std_mode == 'batch':
             logstd = ((x - mu) ** 2).mean([0], keepdim=True).sqrt().log() 
             logstd = softclip(logstd)
 
-            return 0.5 * torch.pow((x - mu) / logstd.exp(), 2) + logstd + 0.5 * np.log(2 * np.pi)
+            mse = 0.5 * torch.pow((x - mu) / logstd.exp(), 2)
+            nll = mse + logstd + 0.5 * np.log(2 * np.pi)
+            return dict(nll=nll, mse=mse) 
         
         else:
             raise NotImplementedError
@@ -466,21 +479,25 @@ class OutPutNet(nn.Module):
     def mse_nll(self, x, loc, logscale, pred_x, mse_mode):
         mu, logstd = self.out_mu_logstd(torch.cat([loc, logscale], dim=1)).chunk(2, dim=1)
         # print(f' mu: {mu[0]} std {torch.exp(logstd)[0]}')
-        logstd = softclip(logstd)
-        pred_x = self.out_recon(pred_x)
+        logstd = softclip(logstd) * self.H.gradient_smoothing_beta
+        pred_x = draw_gaussian_diag_samples(mu, logstd)
+        # pred_x = self.out_recon(pred_x)
         # print(f'pred_x {pred_x}')
         
         crit = torch.nn.MSELoss(reduction='none')
         mse = crit(pred_x, x)
         if mse_mode == 'pure':
-            return mse
+            nll = mse
+            return dict(nll=nll, mse=mse)
         
         elif mse_mode == 'guassian':
             inv_std = torch.exp(-logstd)
-            return 0.5 * torch.pow(inv_std, 2) * mse + 0.5 * np.log(2 * torch.pi) + logstd 
+            nll = 0.5 * torch.pow(inv_std, 2) * mse + 0.5 * np.log(2 * torch.pi) + logstd
+            return dict(nll=nll, mse=mse)
         
         elif mse_mode == 'sigma':
-            return 0.5 * torch.log(2 * torch.pi * mse) + 0.5
+            nll = 0.5 * torch.log(2 * torch.pi * mse) + 0.5
+            return dict(nll=nll, mse=mse)
         
         else:
             raise NotImplementedError
