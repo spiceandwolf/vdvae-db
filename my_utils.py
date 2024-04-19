@@ -37,8 +37,10 @@ def test_integrate(attrs, min = 0, max = 1, alias2table=None):
 
 def make_points(table_stats, predicates, bias, noise_type=None, alias2table=None):
     attrs, right_bounds, left_bounds = table_stats
-    maxs = right_bounds
-    mins = left_bounds
+    
+    import copy
+    maxs = copy.deepcopy(right_bounds)
+    mins = copy.deepcopy(left_bounds)
     
     for predicate in predicates:
         if len(predicate) == 3:
@@ -127,7 +129,7 @@ def estimate_probabilities(model, integration_domain, dim):
         x = x.reshape(-1, 1, x.shape[1])
         # print(f'x:{x}')
         with torch.no_grad():
-            # elbo = model.module.elbo(x)
+            # elbo = model.modules.elbo(x)
             elbo = model.elbo(x)
             prob_list = torch.exp(elbo)
             return prob_list

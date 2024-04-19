@@ -1,19 +1,25 @@
-import random
 import numpy as np
-import imageio
 import os
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['TF_CPP_MIN_LOG_LEVEL']= '2'
 import time
 import pandas as pd
+import ray
+import ray.air
+import ray.train
 import torch
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader, RandomSampler
+# from torch.utils.data.distributed import DistributedSampler
 from data_tabular import set_up_data
 from utils import get_cpu_stats_over_ranks
-from train_helpers_tabular import set_up_hyperparams, load_vaes, load_opt, accumulate_stats, save_model, update_ema
+from train_helpers_tabular import set_up_hyperparams, load_vaes, load_opt, accumulate_stats, save_model, update_ema, update_hparams
 from my_utils import Card, ErrorMetric, GenerateQuery, make_point_raw, make_points, estimate_probabilities, test_integrate
 from torch.utils.tensorboard import SummaryWriter
+import tempfile
+from ray import train, tune
+from ray.train import Checkpoint
+from ray.tune.schedulers import ASHAScheduler
+
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL']= '2'
 
 
 def training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, iterate):
@@ -21,7 +27,7 @@ def training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, ite
     vae.zero_grad()
     stats, kl_list = vae.forward(data_input, target)
     stats['nelbo'].backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), H.grad_clip, 'inf').item()
+    grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), H.grad_clip).item()
     recon_nans = torch.isnan(stats['recon']).sum()
     kl_dist_nans = torch.isnan(stats['kl_dist']).sum()
     stats.update(dict(kl_dist_nans=0 if kl_dist_nans == 0 else 1, recon_nans=0 if recon_nans == 0 else 1))
@@ -46,18 +52,21 @@ def eval_step(data_input, target, ema_vae):
     stats = get_cpu_stats_over_ranks(stats)
     return stats
 
-def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint, writer):
+def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint, writer=None):
     optimizer, scheduler, cur_eval_loss, iterate, starting_epoch = load_opt(H, vae, logprint)
-    train_sampler = DistributedSampler(data_train, num_replicas=H.mpi_size, rank=H.rank)
+    # train_sampler = DistributedSampler(data_train, num_replicas=H.mpi_size, rank=H.rank)
+    train_sampler = RandomSampler(data_train)
     early_evals = set([1] + [2 ** exp for exp in range(3, 14)])
     stats = []
     iters_since_starting = 0
     H.ema_rate = torch.as_tensor(H.ema_rate).cuda()
     best_score = torch.inf
+    mse_loss = 0
     for epoch in range(starting_epoch, H.num_epochs):
-        train_sampler.set_epoch(epoch)
+        # train_sampler.set_epoch(epoch)
         for x in DataLoader(data_train, batch_size=H.n_batch, drop_last=True, pin_memory=True, sampler=train_sampler):
             target, data_input = preprocess_fn(x)
+            # print(f'target {target[0].dtype} data_input {data_input[0].dtype}')
             training_stats, kl_list = training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, iterate)
             stats.append(training_stats)
             # scheduler.step() # `optimizer.step()`should be called before `lr_scheduler.step()`.
@@ -83,37 +92,49 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
         if epoch % H.epochs_per_eval == 0:
             valid_stats = evaluate(H, ema_vae, data_valid, preprocess_fn)
             logprint(model=H.desc, type='eval_loss', epoch=epoch, step=iterate, **valid_stats)
-            writer.add_scalar('eval_nelbo', valid_stats['filtered_nelbo'], epoch)
+            
+            if writer is not None:
+                writer.add_scalar('eval_nelbo', valid_stats['filtered_nelbo'], epoch)
+                
+            fp = os.path.join(H.save_dir, f'epoch-{epoch}')
+            save_model(fp, vae, ema_vae, optimizer, H)
             if np.isfinite(valid_stats['filtered_nelbo']) and best_score >= valid_stats['mse']:
                 best_score = valid_stats['mse']
                 fp = os.path.join(H.save_dir, f'best')
                 logprint(f'Saving model@epoch-{epoch} to {fp}')
                 save_model(fp, vae, ema_vae, optimizer, H)
-            
-            # run_test_integrate(H, ema_vae, logprint)
-            
-        writer.add_scalar('train_recon', training_stats['recon'], epoch)
-        writer.add_scalar('train_kl', training_stats['kl_dist'], epoch)
-        writer.add_scalar('train_nelbo', training_stats['nelbo'], epoch)
-        writer.add_scalar('train_mse', training_stats['mse'], epoch)
         
-        for i, kl in enumerate(kl_list):
-            writer.add_scalar(f'train_layer_{i}_kl', kl, epoch)
+        if writer is not None:    
+            writer.add_scalar('train_recon', training_stats['recon'], epoch)
+            writer.add_scalar('train_kl', training_stats['kl_dist'], epoch)
+            writer.add_scalar('train_nelbo', training_stats['nelbo'], epoch)
+            writer.add_scalar('train_mse', training_stats['mse'], epoch)
+        
+            for i, kl in enumerate(kl_list):
+                writer.add_scalar(f'train_layer_{i}_kl', kl, epoch)
             
         # break
             
     valid_stats = evaluate(H, ema_vae, data_valid, preprocess_fn)
     logprint(model=H.desc, type='eval_loss', epoch=H.num_epochs, step=iterate, **valid_stats)
-    writer.add_scalar('eval_nelbo', valid_stats['filtered_nelbo'], epoch)
+    
+    if writer is not None:
+        writer.add_scalar('eval_nelbo', valid_stats['filtered_nelbo'], epoch)
+    
     fp = os.path.join(H.save_dir, f'epoch-{H.num_epochs}')
     logprint(f'Saving model@epoch-{H.num_epochs} to {fp}')
     save_model(fp, vae, ema_vae, optimizer, H) 
+    logprint("Finished Training")
+    
+    result = dict(mse=valid_stats['mse'])
+    return optimizer, result
 
 
 def evaluate(H, ema_vae, data_valid, preprocess_fn):
     stats_valid = []
-    valid_sampler = DistributedSampler(data_valid, num_replicas=H.mpi_size, rank=H.rank)
-    for x in DataLoader(data_valid, batch_size=H.n_batch*10, drop_last=True, pin_memory=True, sampler=valid_sampler):
+    # valid_sampler = DistributedSampler(data_valid, num_replicas=H.mpi_size, rank=H.rank)
+    valid_sampler = RandomSampler(data_valid)
+    for x in DataLoader(data_valid, batch_size=H.n_batch, drop_last=True, pin_memory=True, sampler=valid_sampler):
         target, data_input = preprocess_fn(x)
         validing_stat = eval_step(data_input, target, ema_vae)
         stats_valid.append(validing_stat)
@@ -146,7 +167,7 @@ def run_test_eval(H, ema_vae, data_test, preprocess_fn, logprint):
     logprint(type='test_loss', **stats)
 
 
-def run_query_test_eval(H, ema_vae, table_data, pad_value, logprint):
+def run_query_test_eval(H, model, table_data, pad_value, logprint):
     print('evaluating')
     n_rows = table_data.shape[0] - int(table_data.shape[0] * 0.1) 
     
@@ -161,7 +182,7 @@ def run_query_test_eval(H, ema_vae, table_data, pad_value, logprint):
     for i in range(3000):
         
         cols, ops, vals = GenerateQuery(table_data.columns, rng, table_data[int(table_data.shape[0] * 0.1):])
-        true_card = Card(table_data, cols, ops, vals)
+        true_card = Card(table_data[int(table_data.shape[0] * 0.1):], cols, ops, vals)
         predicates = []
         for c, o, v in zip(cols, ops, vals):
             predicates.append((c, o, v))
@@ -191,7 +212,7 @@ def run_query_test_eval(H, ema_vae, table_data, pad_value, logprint):
         
         # print(integration_domain)
         
-        prob = estimate_probabilities(ema_vae, integration_domain, dim)
+        prob = estimate_probabilities(model, integration_domain, dim)
         
         # print(f'prob: {prob}')
         
@@ -215,7 +236,7 @@ def run_query_test_eval(H, ema_vae, table_data, pad_value, logprint):
         qerrors.append(qerror)
         
         # break
-        
+       
     print(f'estimation failed times: {count}')    
     print('test results')
     print(f"Median: {np.median(qerrors)}")
@@ -259,10 +280,26 @@ def run_test_reconstruct(H, model, data_valid_or_test, preprocess_fn, logprint):
         print(f'pred_x={samples["pred_x"]}, sample_pred_x={samples["sample_pred_x"]}')
         
 
+def train_ray_tune(config, H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint):
+    # update_hparams(H, s=config)
+    H.lr = config["lr"]
+    optimizer, result = train_loop(H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint)
+    with tempfile.TemporaryDirectory() as temp_checkpoint_dir:
+        path = os.path.join(temp_checkpoint_dir, "checkpoint.pt")
+        torch.save(
+            (vae.state_dict(), optimizer.state_dict()), path
+        )
+        checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
+        train.report(
+            {"mse": result["mse"]},
+            checkpoint=checkpoint,
+        )
+
 
 def main():
     H, logprint = set_up_hyperparams()
     H, data_train, data_valid_or_test, preprocess_fn, original_data = set_up_data(H)
+    writer = SummaryWriter(f'runs/{H.dataset}_{H.test_name}')
     vae, ema_vae = load_vaes(H, logprint)
     
     # data = select_n_random(data_train, labels=None, n=4)
@@ -280,9 +317,10 @@ def main():
     # return
     
     if H.test_eval:
-        vae = vae.module
+        
+        # vae = vae.module
         # run_test_eval(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
-        run_query_test_eval(H, ema_vae, original_data, H.pad_value, logprint)
+        run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
         # run_test_integrate(H, ema_vae, logprint)
         # run_test_reconstruct(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
         '''  
@@ -301,14 +339,62 @@ def main():
                 
             print('--------')
         '''  
-    else:
-        writer = SummaryWriter(f'runs/{H.dataset}_{H.test_name}')
+    
+    elif H.train_ray_tune:
+        # ray config
+        config  = {
+            "lr": tune.loguniform(5e-5, 1e-3),
+        }
+        
+        ray.init()
+        
+        tuning_scheduler = ASHAScheduler(
+            max_t=H.num_epochs,
+            grace_period=1,
+            reduction_factor=2)
+        
+        if H.tuning_recover:
+            tuner = tune.Tuner.restore(
+                os.path.join(os.getcwd(), "results/power_test"),
+                tune.with_resources(
+                    tune.with_parameters(train_ray_tune, H=H, data_train=data_train, data_valid_or_test=data_valid_or_test, preprocess_fn=preprocess_fn, vae=vae, ema_vae=ema_vae, logprint=logprint),
+                    resources={"cpu": 16, "gpu": 1},
+                ),
+                resume_errored=True,
+            )
+            
+        else:
+            tuner = tune.Tuner(
+                tune.with_resources(
+                    tune.with_parameters(train_ray_tune, H=H, data_train=data_train, data_valid_or_test=data_valid_or_test, preprocess_fn=preprocess_fn, vae=vae, ema_vae=ema_vae, logprint=logprint),
+                    resources={"cpu": 16, "gpu": 1},
+                ),
+                param_space=config,
+                tune_config=tune.TuneConfig(
+                    metric="mse",
+                    mode="min",
+                    scheduler=tuning_scheduler,
+                    num_samples=10,
+                ),
+                run_config=ray.train.RunConfig(
+                    name="power_test",
+                    storage_path=os.path.join(os.getcwd(), "results"), 
+                ),
+            )
+        
+        results = tuner.fit()
+        best_model = results.get_best_result("mse", "min")
+        
+    elif H.train:
         
         train_loop(H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint, writer)
-        writer.close()
-        # run_test_integrate(H, ema_vae, logprint)
-        run_query_test_eval(H, ema_vae, original_data, H.pad_value, logprint)
         
-
+        # run_test_integrate(H, ema_vae, logprint)
+        # vae = vae.module
+        run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
+        
+    writer.close()
+        
+        
 if __name__ == "__main__":
     main()

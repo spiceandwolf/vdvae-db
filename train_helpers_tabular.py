@@ -15,10 +15,10 @@ from utils import (logger,
 from data import mkdir_p
 from contextlib import contextmanager
 import torch.distributed as dist
-from apex.optimizers import FusedAdam as AdamW
+# from apex.optimizers import FusedAdam as AdamW
 from torch.optim import Adamax
 from vae_tabular import VAE
-from torch.nn.parallel.distributed import DistributedDataParallel
+# from torch.nn.parallel.distributed import DistributedDataParallel
 
 
 def update_ema(vae, ema_vae, ema_rate):
@@ -103,9 +103,17 @@ def first_rank_first(local_rank, mpi_size):
 def setup_save_dirs(H):
     H.save_dir = os.path.join(H.save_dir, H.desc)
     # H.save_dir = os.path.join(H.save_dir, str(H.lr) + '-' + H.dec_blocks + '-' + H.enc_blocks)
-    H.save_dir = os.path.join(H.save_dir, H.test_name)
+    H.save_dir = os.path.join(os.path.abspath(H.save_dir), H.test_name)
     mkdir_p(H.save_dir)
     H.logdir = os.path.join(H.save_dir, 'log')
+
+
+def update_hparams(H, s):
+    parser = argparse.ArgumentParser()
+    H.update(parser.parse_args(s).__dict__)
+    H.logprint(f'update')
+    for i, k in enumerate(sorted(H)):
+        H.logprint(type='hparam', key=k, value=H[k])
 
 
 def set_up_hyperparams(s=None):
@@ -113,7 +121,7 @@ def set_up_hyperparams(s=None):
     parser = argparse.ArgumentParser()
     parser = add_vae_arguments(parser)
     parse_args_and_update_hparams(H, parser, s=s)
-    setup_mpi(H)
+    # setup_mpi(H)
     setup_save_dirs(H)
     logprint = logger(H.logdir)
     for i, k in enumerate(sorted(H)):
@@ -121,6 +129,7 @@ def set_up_hyperparams(s=None):
     np.random.seed(H.seed)
     torch.manual_seed(H.seed)
     torch.cuda.manual_seed(H.seed)
+    
     logprint('training model', H.desc, 'on', H.dataset)
     return H, logprint
 
@@ -167,7 +176,7 @@ def load_vaes(H, logprint):
     vae = vae.cuda(H.local_rank)
     ema_vae = ema_vae.cuda(H.local_rank)
 
-    vae = DistributedDataParallel(vae, device_ids=[H.local_rank], output_device=H.local_rank, find_unused_parameters=True)
+    # vae = DistributedDataParallel(vae, device_ids=[H.local_rank], output_device=H.local_rank)
 
     if len(list(vae.named_parameters())) != len(list(vae.parameters())):
         raise ValueError('Some params are not named. Please name all params.')
@@ -182,11 +191,12 @@ def load_opt(H, vae, logprint):
     # optimizer = AdamW(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2))
     optimizer = Adamax(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2), foreach=False)
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=H.iters, eta_min=H.lr_min)
     scheduler = NarrowCosineDecay(optimizer, decay_steps=H.decay_iters, decay_start=H.decay_start, minimum_learning_rate=H.min_lr, last_epoch=H.last_epoch, warmup_steps=H.warmup_iters)
-
     if H.restore_optimizer_path:
-        optimizer.load_state_dict(
-            torch.load(distributed_maybe_download(H.restore_optimizer_path, H.local_rank, H.mpi_size), map_location='cpu'))
+        # optimizer.load_state_dict(
+        #     torch.load(distributed_maybe_download(H.restore_optimizer_path, H.local_rank, H.mpi_size), map_location='cpu'))
+        optimizer.load_state_dict(torch.load(H.restore_optimizer_path, map_location='cpu'))
     if H.restore_log_path:
         cur_eval_loss, iterate, starting_epoch = restore_log(H.restore_log_path, H.local_rank, H.mpi_size)
     else:
@@ -203,7 +213,7 @@ class NarrowCosineDecay(torch.optim.lr_scheduler.CosineAnnealingLR):
         self.warmup_steps = warmup_steps
 
         assert self.warmup_steps <= self.decay_start
-
+        
         super(NarrowCosineDecay, self).__init__(optimizer=optimizer, last_epoch=last_epoch, T_max=decay_steps,
                                                 eta_min=self.minimum_learning_rate)
 

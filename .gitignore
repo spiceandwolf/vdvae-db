@@ -163,3 +163,4 @@ apex/
 cifar-10-batches-py/
 saved_models/
 runs/
+results/

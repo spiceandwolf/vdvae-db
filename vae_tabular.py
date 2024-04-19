@@ -138,9 +138,10 @@ def draw_gaussian_diag_samples_std(mu, sigma):
     return sigma * eps + mu
 
 
-def softclip(tensor, min=-8):
+def softclip(tensor, gradient_smoothing_beta = 1, min = -15):
     """ Clips the tensor values at the minimum value min in a softway. Taken from Handful of Trials """
-    result_tensor = min + F.softplus(tensor - min)
+    tensor = tensor * gradient_smoothing_beta
+    result_tensor = torch.maximum(tensor, torch.as_tensor(np.array(min)))
 
     return result_tensor
 
@@ -221,8 +222,8 @@ class DecBlock(nn.Module):
         xpp = feats[:, self.zdim * 2:, ...] # xpp is a tensor used to modify x in the next step.                                                                                              
         x = x + xpp
         
-        qv = softclip(qv) * self.gradient_smoothing_beta
-        pv = softclip(pv) * self.gradient_smoothing_beta
+        qv = softclip(qv)
+        pv = softclip(pv)
         z = draw_gaussian_diag_samples(qm, qv)
         kl = gaussian_analytical_kl(qm, pm, qv, pv)
        
@@ -358,20 +359,14 @@ class VAE(HModule):
     def forward(self, x, x_target):
         # x : [batch_size, channels, length] or [batch_size, channels, height, width]
         activations = self.encoder.forward(x)
-        pred_x, stats = self.decoder.forward(activations)
-        
-        posterior_mu = stats[-1]['qm']
-        # posterior_mu = self.decoder.out_net(posterior_mu)
-        posterior_logstd = stats[-1]['qv']
-        # posterior_logstd = self.decoder.out_net(posterior_logstd)
-        
-        # print(f'posterior_mu {posterior_mu} {posterior_mu.shape}')
-        # print(f'posterior_std {torch.exp(posterior_logstd)} {posterior_logstd.shape}')
+        px_z, stats = self.decoder.forward(activations)
         
         if self.H.out_net_mode == 'gaussian':
-            out_dict = self.decoder.out_net.gaussian_nll(x, posterior_mu, posterior_logstd, self.H.std_mode)
+            out_dict = self.decoder.out_net.gaussian_nll(x, px_z, self.H.std_mode)
         elif self.H.out_net_mode == 'mse':
-            out_dict = self.decoder.out_net.mse_nll(x, posterior_mu, posterior_logstd, pred_x, self.H.mse_mode)
+            out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
+        elif self.H.out_net_mode == 'discretized_gaussian':
+            out_dict = self.decoder.out_net.discretized_gaussian_nll(x, px_z)
         else:
             raise NotImplementedError
         
@@ -414,21 +409,19 @@ class VAE(HModule):
         # print(f'x {x[0]} {x.shape}')
         activations = self.encoder.forward(x)
         # print(activations.keys())
-        pred_x, stats = self.decoder.forward(activations)
+        px_z, stats = self.decoder.forward(activations)
         
-        # z_L_distribution = self.decoder.dec_blocks[-1].distribution
-        posterior_mu = stats[-1]['qm']
-        posterior_logstd = stats[-1]['qv']
+        # if self.H.out_net_mode == 'gaussian':
+        #     out_dict = self.decoder.out_net.gaussian_nll(x, px_z, self.H.std_mode)
+        # elif self.H.out_net_mode == 'mse':
+        #     out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
+        # else:
+        #     raise NotImplementedError
         
-        if self.H.out_net_mode == 'gaussian':
-            out_dict = self.decoder.out_net.gaussian_nll(x, posterior_mu, posterior_logstd, self.H.std_mode)
-        elif self.H.out_net_mode == 'mse':
-            out_dict = self.decoder.out_net.mse_nll(x, posterior_mu, posterior_logstd, pred_x, self.H.mse_mode)
-        else:
-            raise NotImplementedError
+        out_dict = self.decoder.out_net.gaussian_nll(x, px_z, "learned")
         
+        # print(f'mse : {out_dict['mse']}')
         nll = out_dict['nll'].sum(dim=(1,2))
-        mse = out_dict['mse'].sum(dim=(1,2))
         
         kl_dist = torch.zeros_like(nll) 
         kl_list = []
@@ -448,21 +441,14 @@ class OutPutNet(nn.Module):
         self.H = H
         self.width = H.width
         self.std_activation = nn.Softplus(beta=H.gradient_smoothing_beta) # ln(2) ~= 0.6931472.
-        self.out_mu_logstd = get_3x1(H.width * 2, H.image_channels * 2) # because of the self.in_conv = get_3x1(H.image_channels, H.width) in encoder
-        self.out_recon = get_3x1(H.width, H.image_channels)
+        self.out_conv = get_conv(H.width, H.image_channels * 2, kernel_size=1, stride=1, padding=0) # loc and scale
 
-    def gaussian_nll(self, x, posterior_mu, posterior_logstd, std_mode):
-        mu, logstd = self.out_mu_logstd(torch.cat([posterior_mu, posterior_logstd], dim=1)).chunk(2, dim=1)
+    def gaussian_nll(self, x, px_z, std_mode):
+        mu, logstd = self.forward(px_z).chunk(2, dim=1)
         if std_mode == 'learned':
-            logstd = softclip(logstd)
-            mse = 0.5 * torch.pow((x - mu) / logstd.exp(), 2)
-            nll = mse + logstd + 0.5 * np.log(2 * np.pi)
-            return dict(nll=nll, mse=mse) 
-        
-        elif std_mode == 'global':
-            std = self.H.prior_std
-            mse = 0.5 * torch.pow((x - mu) / std, 2)
-            nll = mse + torch.log(std) + 0.5 * np.log(2 * np.pi)
+            # logstd = softclip(logstd)
+            mse = 0.5 * torch.pow((x - mu), 2)
+            nll = mse / logstd.exp() ** 2 + logstd + 0.5 * np.log(2 * np.pi)
             return dict(nll=nll, mse=mse) 
         
         elif std_mode == 'batch':
@@ -476,34 +462,72 @@ class OutPutNet(nn.Module):
         else:
             raise NotImplementedError
 
-    def mse_nll(self, x, loc, logscale, pred_x, mse_mode):
-        mu, logstd = self.out_mu_logstd(torch.cat([loc, logscale], dim=1)).chunk(2, dim=1)
-        # print(f' mu: {mu[0]} std {torch.exp(logstd)[0]}')
-        logstd = softclip(logstd) * self.H.gradient_smoothing_beta
-        pred_x = draw_gaussian_diag_samples(mu, logstd)
-        # pred_x = self.out_recon(pred_x)
-        # print(f'pred_x {pred_x}')
+    def mse_nll(self, x, px_z, mse_mode):
         
         crit = torch.nn.MSELoss(reduction='none')
-        mse = crit(pred_x, x)
+        mu, logstd = self.forward(px_z).chunk(2, dim=1)
+        pred_x = draw_gaussian_diag_samples(mu, logstd)
+        
         if mse_mode == 'pure':
+            # print(f' mu: {mu[0]} std {torch.exp(logstd)[0]}')
+            
+            mse = crit(pred_x, x)
             nll = mse
             return dict(nll=nll, mse=mse)
         
         elif mse_mode == 'guassian':
+            # print(f' mu: {mu[0]} std {torch.exp(logstd)[0]}')
+            
+            std = torch.exp(logstd)
+            # logstd = softclip(logstd)
             inv_std = torch.exp(-logstd)
-            nll = 0.5 * torch.pow(inv_std, 2) * mse + 0.5 * np.log(2 * torch.pi) + logstd
+            mse = crit(pred_x, x)
+            nll = 0.5 * torch.pow(inv_std, 2) * mse + 0.5 * torch.log(2 * torch.pi * std ** 2)
             return dict(nll=nll, mse=mse)
         
         elif mse_mode == 'sigma':
+            # print(f'pred_x {pred_x}')
+            # mse = crit(pred_x, x) + 1e-16
+            mse = crit(pred_x, x)
             nll = 0.5 * torch.log(2 * torch.pi * mse) + 0.5
+            nll = torch.where(torch.isfinite(nll), nll, torch.as_tensor(-20))
             return dict(nll=nll, mse=mse)
         
         else:
             raise NotImplementedError
+        
+    def discretized_gaussian_log_likelihood(self, x, loc, log_scale, thres = 1):
+        assert x.shape == loc.shape == log_scale.shape
+
+        centered_x = x - loc
+        print(f'x: {x} {x.shape}')
+        print(f'loc: {loc} {loc.shape}')
+        inv_stdv = torch.exp(-log_scale)
+        plus_in = inv_stdv * (centered_x + self.H.shift)
+        cdf_plus = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(plus_in)
+        min_in = inv_stdv * (centered_x - self.H.shift)
+        cdf_min = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(min_in)
+        log_cdf_plus = torch.log(cdf_plus)
+        log_one_minus_cdf_min = torch.log(1. - cdf_min)
+        cdf_delta = cdf_plus - cdf_min
+
+        log_probs = torch.where(x < -thres, log_cdf_plus,
+                        torch.where(x > thres, log_one_minus_cdf_min,
+                            torch.where(cdf_delta > 1e-8, torch.log(cdf_delta), -16)))
+
+        return log_probs
     
-    def forward(self, pred_x):
-        xhat = self.out_recon(pred_x)
+    def discretized_gaussian_nll(self, x, px_z):
+        mu, logstd = self.forward(px_z).chunk(2, dim=1)
+        crit = torch.nn.MSELoss(reduction='none')
+        pred_x = draw_gaussian_diag_samples(mu, logstd)
+        mse = crit(pred_x, x)
+        
+        nll = -self.discretized_gaussian_log_likelihood(x, mu, logstd)
+        return dict(nll=nll, mse=mse)
+
+    def forward(self, px_z):
+        xhat = self.out_conv(px_z)
         return xhat
     
     def sample(self, x, loc, logscale, pred_x):

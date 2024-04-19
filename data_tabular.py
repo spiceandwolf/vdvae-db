@@ -25,23 +25,42 @@ def set_up_data(H):
         eval_dataset = vaX
 
     shift = torch.tensor(H.pad_value).cuda().view(1, 1, H.width)
-    data_max_ = torch.tensor(original_data.max(axis=0)).cuda().view(1, 1, H.width)
-    data_min_ = torch.tensor(original_data.min(axis=0)).cuda().view(1, 1, H.width)
-    H.prior_std = (shift / 3 / (data_max_ - data_min_)).float()
-    print(f'prior_std {H.prior_std}')
+    data_max_ = torch.tensor(original_data.max().values).cuda().view(1, 1, H.width)
+    data_min_ = torch.tensor(original_data.min().values).cuda().view(1, 1, H.width)
 
     train_data = TensorDataset(torch.as_tensor(trX))
     valid_data = TensorDataset(torch.as_tensor(eval_dataset))
     untranspose = False
     noise_type = H.noise_type
-    is_raw_data = H.raw_data
+    normalize = H.normalize
+    
+    if noise_type == 'uniform':
+        '''
+        bin = 2 * shift
+        [a, a + bin)
+        domian : [data_min_, data_max_ + bin)
+        '''
+        data_max = data_max_ + 2 * shift
+        data_min = data_min_
+    elif noise_type == 'gaussian':
+        '''
+        (a - shift, a + shift)
+        bin = 2 * shift
+        domian : (data_min_ - bin, data_max_ + bin)
+        '''
+        data_max = data_max_ + 2 * shift 
+        data_min = data_min_ - 2 * shift
+        
+    H.shift = (shift / (data_max - data_min)).float()
+    H.prior_std = (H.shift / 3).float()
+    print(f'shift {H.shift}')
 
     def preprocess_func(x):
         nonlocal shift
-        nonlocal data_max_
-        nonlocal data_min_
+        nonlocal data_max
+        nonlocal data_min
         nonlocal noise_type
-        nonlocal is_raw_data
+        nonlocal normalize
         nonlocal untranspose
         'takes in a data example and returns the preprocessed input'
         'as well as the input processed for the loss'
@@ -53,30 +72,22 @@ def set_up_data(H):
         scale = 0
         
         if noise_type == 'uniform':
-            '''
-            bin = 2 * shift
-            [a, a + bin)
-            domian : [data_min_, data_max_ + bin)
-            '''
             scale = torch.empty_like(inp).uniform_(0, 1) * 2
-            data_max_ = data_max_ + 2 * shift
+
         elif noise_type == 'gaussian':
-            '''
-            (a - shift, a + shift)
-            bin = 2 * shift
-            domian : (data_min_ - bin, data_max_ + bin)
-            '''
             scale = torch.empty_like(inp).normal_(0, 1 / 3) 
-            data_max_ = data_max_ + 2 * shift 
-            data_min_ = data_min_ - 2 * shift
+            
         elif noise_type == 'None':
             scale = torch.zeros_like(inp)
             
         out = out + scale * shift
             
-        # print(f'out {out}')
-        if is_raw_data != True:
-            out = (out - data_min_) / (data_max_ - data_min_)
+        # print(f'out {out[0]}')
+        if normalize == 'minmax':
+            out = (out - data_min) / (data_max - data_min)
+        elif normalize == 'integer':
+            scale = 0.5 / shift
+            out = out * scale
         
         return inp.float(), out.float()
 
