@@ -498,22 +498,19 @@ class OutPutNet(nn.Module):
         
     def discretized_gaussian_log_likelihood(self, x, loc, log_scale, thres = 1):
         assert x.shape == loc.shape == log_scale.shape
-
+        
         centered_x = x - loc
-        print(f'x: {x} {x.shape}')
-        print(f'loc: {loc} {loc.shape}')
         inv_stdv = torch.exp(-log_scale)
         plus_in = inv_stdv * (centered_x + self.H.shift)
         cdf_plus = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(plus_in)
         min_in = inv_stdv * (centered_x - self.H.shift)
         cdf_min = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(min_in)
-        log_cdf_plus = torch.log(cdf_plus)
-        log_one_minus_cdf_min = torch.log(1. - cdf_min)
+        log_cdf_plus = torch.log(softclip(cdf_plus, min=1e-15))
+        log_one_minus_cdf_min = torch.log(softclip(1. - cdf_min, min=1e-15))
         cdf_delta = cdf_plus - cdf_min
 
         log_probs = torch.where(x < -thres, log_cdf_plus,
-                        torch.where(x > thres, log_one_minus_cdf_min,
-                            torch.where(cdf_delta > 1e-8, torch.log(cdf_delta), -16)))
+                        torch.where(x > thres, log_one_minus_cdf_min, torch.log(softclip(cdf_delta, min=1e-15))))
 
         return log_probs
     

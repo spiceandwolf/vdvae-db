@@ -23,27 +23,29 @@ os.environ['TF_CPP_MIN_LOG_LEVEL']= '2'
 
 
 def training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, iterate):
-    t0 = time.time()
-    vae.zero_grad()
-    stats, kl_list = vae.forward(data_input, target)
-    stats['nelbo'].backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), H.grad_clip).item()
-    recon_nans = torch.isnan(stats['recon']).sum()
-    kl_dist_nans = torch.isnan(stats['kl_dist']).sum()
-    stats.update(dict(kl_dist_nans=0 if kl_dist_nans == 0 else 1, recon_nans=0 if recon_nans == 0 else 1))
-    stats = get_cpu_stats_over_ranks(stats)
+    from torch import autograd
+    with autograd.set_detect_anomaly(True):
+        t0 = time.time()
+        vae.zero_grad()
+        stats, kl_list = vae.forward(data_input, target)
+        stats['nelbo'].backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), H.grad_clip).item()
+        recon_nans = torch.isnan(stats['recon']).sum()
+        kl_dist_nans = torch.isnan(stats['kl_dist']).sum()
+        stats.update(dict(kl_dist_nans=0 if kl_dist_nans == 0 else 1, recon_nans=0 if recon_nans == 0 else 1))
+        stats = get_cpu_stats_over_ranks(stats)
 
-    skipped_updates = 1
-    # only update if no rank has a nan and if the grad norm is below a specific threshold
-    if stats['recon_nans'] == 0 and stats['kl_dist_nans'] == 0 and (H.skip_threshold == -1 or grad_norm < H.skip_threshold):
-        optimizer.step()
-        skipped_updates = 0
-        update_ema(vae, ema_vae, H.ema_rate)
-        scheduler.step()
+        skipped_updates = 1
+        # only update if no rank has a nan and if the grad norm is below a specific threshold
+        if stats['recon_nans'] == 0 and stats['kl_dist_nans'] == 0 and (H.skip_threshold == -1 or grad_norm < H.skip_threshold):
+            optimizer.step()
+            skipped_updates = 0
+            update_ema(vae, ema_vae, H.ema_rate)
+            scheduler.step()
 
-    t1 = time.time()
-    stats.update(skipped_updates=skipped_updates, iter_time=t1 - t0, grad_norm=grad_norm)
-    return stats, kl_list
+        t1 = time.time()
+        stats.update(skipped_updates=skipped_updates, iter_time=t1 - t0, grad_norm=grad_norm)
+        return stats, kl_list
 
 
 def eval_step(data_input, target, ema_vae):
@@ -88,6 +90,7 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
             #     save_model(os.path.join(H.save_dir, f'iter-{iterate}'), vae, ema_vae, optimizer, H)
                 
             # break
+            # return
 
         if epoch % H.epochs_per_eval == 0:
             valid_stats = evaluate(H, ema_vae, data_valid, preprocess_fn)
@@ -391,7 +394,7 @@ def main():
         
         # run_test_integrate(H, ema_vae, logprint)
         # vae = vae.module
-        run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
+        # run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
         
     writer.close()
         
