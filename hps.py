@@ -111,7 +111,6 @@ def add_vae_arguments(parser):
     parser.add_argument('--last_epoch', type=int, default=-1)
     parser.add_argument('--decay_iters', type=int, default=0)
     parser.add_argument('--decay_start', type=int, default=0)
-    parser.add_argument('--prior_std', type=int, default=0)
     parser.add_argument('--out_net_mode', type=str, default='')
     parser.add_argument('--mse_mode', type=str, default='')
     parser.add_argument('--std_mode', type=str, default='')
