@@ -129,7 +129,7 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
     save_model(fp, vae, ema_vae, optimizer, H) 
     logprint("Finished Training")
     
-    result = dict(mse=valid_stats['mse'])
+    result = dict(mse=valid_stats['mse'], nelbo=valid_stats['filtered_nelbo'], kl_dist=valid_stats['kl_dist'])
     return optimizer, result
 
 
@@ -284,17 +284,33 @@ def run_test_reconstruct(H, model, data_valid_or_test, preprocess_fn, logprint):
         
 
 def train_ray_tune(config, H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint):
-    # update_hparams(H, s=config)
-    H.lr = config["lr"]
+    H.n_batch = config["n_batch"]
+    n_layer_1 = config["n_layer_1"]
+    n_layer_3 = config["n_layer_3"]
+    n_layer_7 = config["n_layer_7"]
+    H.dec_blocks = f"1x{n_layer_1},3m1,3x{n_layer_3},7m3,7x{n_layer_7}"
+    H.enc_blocks = f"7x{n_layer_7},7d2,3x{n_layer_3},3d2,1x{n_layer_1}"
+    vae, ema_vae = load_vaes(H, logprint)
+    for i, k in enumerate(sorted(H)):
+        logprint(type='hparam', key=k, value=H[k])
     optimizer, result = train_loop(H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint)
     with tempfile.TemporaryDirectory() as temp_checkpoint_dir:
         path = os.path.join(temp_checkpoint_dir, "checkpoint.pt")
         torch.save(
-            (vae.state_dict(), optimizer.state_dict()), path
+            {
+                "optimizer": optimizer.state_dict(),
+                "model": vae.state_dict(),
+            }, 
+            path
         )
         checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
         train.report(
-            {"mse": result["mse"]},
+            {"n_batch": config["n_batch"],
+             "dec_blocks": H.dec_blocks,
+             "enc_blocks": H.enc_blocks,
+             "mse": result["mse"],
+             "nelbo": result["nelbo"],
+             },
             checkpoint=checkpoint,
         )
 
@@ -304,23 +320,24 @@ def main():
     H, data_train, data_valid_or_test, preprocess_fn, original_data = set_up_data(H)
     writer = SummaryWriter(f'runs/{H.dataset}_{H.test_name}')
     vae, ema_vae = load_vaes(H, logprint)
+    '''
+    data = select_n_random(data_train, labels=None, n=4)
     
-    # data = select_n_random(data_train, labels=None, n=4)
+    test = torch.tensor([[[0.076, 0.0, 223.2, 0.2, 0.0, 0.0, 0.0]]]).cuda()
+    _, test = preprocess_fn(test)
+    print(f'test {test}')
     
-    # test = torch.tensor([[[0.076, 0.0, 223.2, 0.2, 0.0, 0.0, 0.0]]]).cuda()
-    # _, test = preprocess_fn(test)
-    # print(f'test {test}')
+    features = torch.cat([row for row in data], dim=0).view(-1, 7)
+    writer.add_embedding(features)
     
-    # features = torch.cat([row for row in data], dim=0).view(-1, 7)
-    # writer.add_embedding(features)
-    
-    # for name, paras in vae.named_parameters():
-    #     logprint(name)
-    #     logprint(f'{paras}')
-    # return
-    
+    for name, paras in vae.named_parameters():
+        logprint(name)
+        logprint(f'{paras}')
+    return
+    '''
     if H.test_eval:
-        
+        for i, k in enumerate(sorted(H)):
+            logprint(type='hparam', key=k, value=H[k])
         # vae = vae.module
         # run_test_eval(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
         run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
@@ -345,8 +362,11 @@ def main():
     
     elif H.train_ray_tune:
         # ray config
-        config  = {
-            "lr": tune.loguniform(5e-5, 1e-3),
+        config = {
+            "n_batch" : tune.choice([1024, 2048, 4096, 8192]),
+            "n_layer_1" : tune.randint(1, 9),
+            "n_layer_3" : tune.randint(1, 9),
+            "n_layer_7" : tune.randint(1, 9),
         }
         
         ray.init()
@@ -356,9 +376,12 @@ def main():
             grace_period=1,
             reduction_factor=2)
         
+        ray_result_dict = "results/power_tuning/"
+        ray_result_name = "n_batch_dec_enc"
+        
         if H.tuning_recover:
             tuner = tune.Tuner.restore(
-                os.path.join(os.getcwd(), "results/power_test"),
+                os.path.join(os.getcwd(), ray_result_dict + ray_result_name),
                 tune.with_resources(
                     tune.with_parameters(train_ray_tune, H=H, data_train=data_train, data_valid_or_test=data_valid_or_test, preprocess_fn=preprocess_fn, vae=vae, ema_vae=ema_vae, logprint=logprint),
                     resources={"cpu": 16, "gpu": 1},
@@ -377,24 +400,36 @@ def main():
                     metric="mse",
                     mode="min",
                     scheduler=tuning_scheduler,
-                    num_samples=10,
+                    num_samples=24,
                 ),
                 run_config=ray.train.RunConfig(
-                    name="power_test",
-                    storage_path=os.path.join(os.getcwd(), "results"), 
+                    name=ray_result_name,
+                    storage_path=os.path.join(os.getcwd(), ray_result_dict), 
                 ),
             )
         
         results = tuner.fit()
-        best_model = results.get_best_result("mse", "min")
+        best_result = results.get_best_result("mse", "min")
+        n_layer_1 = config["n_layer_1"]
+        n_layer_3 = config["n_layer_3"]
+        n_layer_7 = config["n_layer_7"]
+        H.dec_blocks = f"1x{n_layer_1},3m1,3x{n_layer_3},7m3,7x{n_layer_7}"
+        H.enc_blocks = f"7x{n_layer_7},7d2,3x{n_layer_3},3d2,1x{n_layer_1}"
+        best_vae, _ = load_vaes(H, logprint)
+        with best_result.checkpoint.as_directory() as checkpoint_dir:
+            # The model state dict was saved under `model.pt` by the training function
+            best_vae.load_state_dict(torch.load(os.path.join(checkpoint_dir, "checkpoint.pt"))["model"])
+            run_query_test_eval(H, best_vae, original_data, H.pad_value, logprint)
+        
         
     elif H.train:
-        
+        for i, k in enumerate(sorted(H)):
+            logprint(type='hparam', key=k, value=H[k])
         train_loop(H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint, writer)
         
         # run_test_integrate(H, ema_vae, logprint)
         # vae = vae.module
-        # run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
+        run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
         
     writer.close()
         

@@ -124,8 +124,6 @@ def set_up_hyperparams(s=None):
     # setup_mpi(H)
     setup_save_dirs(H)
     logprint = logger(H.logdir)
-    for i, k in enumerate(sorted(H)):
-        logprint(type='hparam', key=k, value=H[k])
     np.random.seed(H.seed)
     torch.manual_seed(H.seed)
     torch.cuda.manual_seed(H.seed)
@@ -173,8 +171,10 @@ def load_vaes(H, logprint):
         ema_vae.load_state_dict(vae.state_dict())
     ema_vae.requires_grad_(False)
 
-    vae = vae.cuda(H.local_rank)
-    ema_vae = ema_vae.cuda(H.local_rank)
+    # vae = vae.cuda(H.local_rank)
+    # ema_vae = ema_vae.cuda(H.local_rank)
+    vae = vae.cuda()
+    ema_vae = ema_vae.cuda()
 
     # vae = DistributedDataParallel(vae, device_ids=[H.local_rank], output_device=H.local_rank)
 
