@@ -138,10 +138,10 @@ def draw_gaussian_diag_samples_std(mu, sigma):
     return sigma * eps + mu
 
 
-def softclip(tensor, gradient_smoothing_beta = 1, min = -15):
+def softclip(tensor, gradient_smoothing_beta = 1, min = -250):
     """ Clips the tensor values at the minimum value min in a softway. Taken from Handful of Trials """
     tensor = tensor * gradient_smoothing_beta
-    result_tensor = torch.maximum(tensor, torch.as_tensor(np.array(min)))
+    result_tensor = torch.clamp(tensor, min)
 
     return result_tensor
 
@@ -222,8 +222,8 @@ class DecBlock(nn.Module):
         xpp = feats[:, self.zdim * 2:, ...] # xpp is a tensor used to modify x in the next step.                                                                                              
         x = x + xpp
         
-        qv = softclip(qv)
-        pv = softclip(pv)
+        # qv = softclip(qv)
+        # pv = softclip(pv)
         z = draw_gaussian_diag_samples(qm, qv)
         kl = gaussian_analytical_kl(qm, pm, qv, pv)
        
@@ -232,8 +232,9 @@ class DecBlock(nn.Module):
         # z = draw_gaussian_diag_samples_std(qm, qv)
         # kl = gaussian_analytical_kl_std(qm, pm, qv, pv)
         # self.distribution = D.Normal(qm, qv)
+        distr_params = dict(qm=qm, qv=qv, pm=pm, pv=pv)
         
-        return z, x, kl, qm, qv
+        return z, x, kl, distr_params
 
     def sample_uncond(self, x, t=None, lvs=None):
         n, c, h, w = x.shape
@@ -268,14 +269,14 @@ class DecBlock(nn.Module):
             # print(f'x unpool {self.unpool(xs[self.mixin][:, :x.shape[1], ...]).shape}')
             x = x + self.unpool(xs[self.mixin][:, :x.shape[1], ...])
             # print(f'x unpool {x.shape}')
-        z, x, kl, qm, qv = self.sample(x, acts)
+        z, x, kl, distr_params = self.sample(x, acts)
         x = x + self.z_fn(z)
         x = self.resnet(x)
         xs[self.base] = x 
         
         if get_latents:
-            return xs, dict(z=z.detach(), kl=kl, qm=qm, qv=qv)
-        return xs, dict(kl=kl, qm=qm, qv=qv)
+            return xs, dict(z=z.detach(), kl=kl, **distr_params)
+        return xs, dict(kl=kl, **distr_params)
 
     def forward_uncond(self, xs, t=None, lvs=None):
         try:
@@ -417,7 +418,7 @@ class VAE(HModule):
         #     out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
         # else:
         #     raise NotImplementedError
-        
+        '''
         out_dict = self.decoder.out_net.gaussian_nll(x, px_z, "learned")
         
         # print(f'mse : {out_dict['mse']}')
@@ -431,6 +432,33 @@ class VAE(HModule):
             kl_dist += statdict['kl'].sum(dim=(1,2))
         
         elbo = (-nll - kl_dist)
+        '''
+        H_prior = H_dec = H_enc = 0
+        '''
+        px_z_loc, px_z_logscale = self.decoder.out_net(px_z).chunk(2, dim=1)
+        p_z_distr = torch.distributions.Normal(torch.zeros_like(px_z_loc), torch.ones_like(px_z_logscale))
+        px_z_distr = torch.distributions.Normal(px_z_loc, torch.exp(px_z_logscale))
+        qz_x_distr = torch.distributions.Normal(stats[0]['qm'], torch.exp(stats[0]['qv']))
+        
+        # Calculate Three Entropies
+        H_prior = p_z_distr.entropy().sum((1,2))  # sum over latent dims
+        H_enc = qz_x_distr.entropy().sum((1,2))  # mean over batch, sum over latent dims
+        H_dec = px_z_distr.entropy().sum((1,2))  # mean over batch, sum over data dims
+        elbo = - H_prior - H_dec + H_enc
+        '''
+        px_z_loc, px_z_logscale = self.decoder.out_net(px_z).chunk(2, dim=1)
+        px_z_distr = torch.distributions.Normal(px_z_loc, torch.exp(px_z_logscale))
+        H_dec += px_z_distr.entropy().sum((1,2))  # mean over batch, sum over data dims
+        for stat in stats:
+            p_z_distr = torch.distributions.Normal(torch.zeros_like(stat['qm']), torch.ones_like(stat['qv']))
+            qz_x_distr = torch.distributions.Normal(stat['qm'], torch.exp(stat['qv']))
+            
+            # Calculate Three Entropies
+            H_prior += p_z_distr.entropy().sum((1,2))  # sum over latent dims
+            H_enc += qz_x_distr.entropy().sum((1,2))  # mean over batch, sum over latent dims
+        H_prior *= 2    
+        elbo = - H_prior - H_dec + H_enc
+        
         return elbo
 
 
@@ -440,7 +468,7 @@ class OutPutNet(nn.Module):
         super().__init__()
         self.H = H
         self.width = H.width
-        self.std_activation = nn.Softplus(beta=H.gradient_smoothing_beta) # ln(2) ~= 0.6931472.
+        self.softplus = nn.Softplus(beta=H.gradient_smoothing_beta) # ln(2) ~= 0.6931472.
         self.out_conv = get_conv(H.width, H.image_channels * 2, kernel_size=1, stride=1, padding=0) # loc and scale
 
     def gaussian_nll(self, x, px_z, std_mode):
@@ -486,11 +514,8 @@ class OutPutNet(nn.Module):
             return dict(nll=nll, mse=mse)
         
         elif mse_mode == 'sigma':
-            # print(f'pred_x {pred_x}')
-            # mse = crit(pred_x, x) + 1e-16
             mse = crit(pred_x, x)
-            nll = 0.5 * torch.log(2 * torch.pi * mse) + 0.5
-            nll = torch.where(torch.isfinite(nll), nll, torch.as_tensor(-20))
+            nll = gaussian_analytical_kl(x, pred_x, torch.log(self.H.sigma), logstd)
             return dict(nll=nll, mse=mse)
         
         else:
@@ -501,16 +526,19 @@ class OutPutNet(nn.Module):
         
         centered_x = x - loc
         inv_stdv = torch.exp(-log_scale)
+        
         plus_in = inv_stdv * (centered_x + self.H.shift)
         cdf_plus = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(plus_in)
         min_in = inv_stdv * (centered_x - self.H.shift)
         cdf_min = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(min_in)
-        log_cdf_plus = torch.log(softclip(cdf_plus, min=1e-15))
-        log_one_minus_cdf_min = torch.log(softclip(1. - cdf_min, min=1e-15))
+        
+        log_cdf_plus = torch.log(cdf_plus)
+        log_one_minus_cdf_min = torch.log(1. - cdf_min)
+        
         cdf_delta = cdf_plus - cdf_min
 
         log_probs = torch.where(x < -thres, log_cdf_plus,
-                        torch.where(x > thres, log_one_minus_cdf_min, torch.log(softclip(cdf_delta, min=1e-15))))
+                        torch.where(x > thres, log_one_minus_cdf_min, torch.log(softclip(cdf_delta, min=1e-100))))
 
         return log_probs
     

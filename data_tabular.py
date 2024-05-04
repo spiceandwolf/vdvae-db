@@ -52,7 +52,7 @@ def set_up_data(H):
         data_min = data_min_ - 2 * shift
         
     H.shift = (shift / (data_max - data_min)).float()
-    H.prior_std = (H.shift / 3).float()
+    H.sigma = (H.shift).float()
     print(f'shift {H.shift}')
 
     def preprocess_func(x):
@@ -85,6 +85,11 @@ def set_up_data(H):
         # print(f'out {out[0]}')
         if normalize == 'minmax':
             out = (out - data_min) / (data_max - data_min)
+            
+        elif normalize  == 'normalize':
+            loc = 0.5 * (data_max + data_min)
+            out = (out - loc) / (0.5 * data_max - 0.5 * data_min)
+            
         elif normalize == 'integer':
             scale = 0.5 / shift
             out = out * scale
