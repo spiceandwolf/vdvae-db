@@ -222,7 +222,7 @@ def run_query_test_eval(H, model, table_data, pad_value, logprint):
         if  math.isnan(prob.item()) or math.isinf(prob.item()):
             est_card = 1
             count += 1
-            continue
+            
         else:
             est_card = max(prob.item() * n_rows, 1)
             # est_card = max(prob.item(), 1)
@@ -412,9 +412,9 @@ def main():
         
         results = tuner.fit()
         best_result = results.get_best_result("mse", "min")
-        n_layer_1 = config["n_layer_1"]
-        n_layer_3 = config["n_layer_3"]
-        n_layer_7 = config["n_layer_7"]
+        n_layer_1 = best_result.config['n_layer_1']
+        n_layer_3 = best_result.config['n_layer_3']
+        n_layer_7 = best_result.config['n_layer_7']
         H.dec_blocks = f"1x{n_layer_1},3m1,3x{n_layer_3},7m3,7x{n_layer_7}"
         H.enc_blocks = f"7x{n_layer_7},7d2,3x{n_layer_3},3d2,1x{n_layer_1}"
         best_vae, _ = load_vaes(H, logprint)
