@@ -53,9 +53,9 @@ class PoolLayer(nn.Module):
         return x
     
     
-class Unpoolayer(nn.Module):
+class UnpoolLayer(nn.Module):
     def __init__(self, in_channels, out_channels, out_size, mixin):
-        super(Unpoolayer, self).__init__()
+        super(UnpoolLayer, self).__init__()
         
         if out_size % 2 != 0:
             assert out_size // mixin == 2 or mixin == 1
@@ -71,21 +71,26 @@ class Unpoolayer(nn.Module):
         x = self.ops(x)
         return x
 
-    
-def get_conv(in_channels, out_channels, kernel_size, stride, padding, zero_bias=True, zero_weights=False, groups=1, scaled=False):
-    c = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, groups=groups)
-    nn.init.xavier_uniform_(c.weight)
-    if zero_bias:
-        c.bias.data *= 0.0
-    if zero_weights:
-        c.weight.data *= 0.0
-    return c
 
-def get_3x1(in_channels, out_channels, zero_bias=True, zero_weights=False, groups=1, scaled=False):
-    return get_conv(in_channels, out_channels, 3, 1, 1, zero_bias, zero_weights, groups=groups, scaled=scaled)
+class Conv1DLayer(nn.Conv1d):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, zero_bias=True, zero_weights=False, groups=1, *args, **kwargs):
+        super(Conv1DLayer, self).__init__(in_channels, out_channels, kernel_size, stride, padding, groups=groups, *args, **kwargs)
+        # nn.init.xavier_uniform_(self.weight)
+        if zero_bias:
+            self.bias.data *= 0.0
+        if zero_weights:
+            self.weight.data *= 0.0
+        
+    def forward(self, x):
+        x = super(Conv1DLayer, self).forward(x)
+        return x
 
-def get_1x1(in_channels, out_channels, zero_bias=True, zero_weights=False, groups=1, scaled=False):
-    return get_conv(in_channels, out_channels, 1, 1, 0, zero_bias, zero_weights, groups=groups, scaled=scaled)
+
+def get_3x1(in_channels, out_channels, zero_bias=True, zero_weights=False, groups=1):
+    return Conv1DLayer(in_channels, out_channels, 3, 1, 1, zero_bias, zero_weights, groups=groups)
+
+def get_1x1(in_channels, out_channels, zero_bias=True, zero_weights=False, groups=1):
+    return Conv1DLayer(in_channels, out_channels, 1, 1, 0, zero_bias, zero_weights, groups=groups)
 
 
 def parse_layer_string(s):
@@ -194,7 +199,7 @@ class DecBlock(nn.Module):
         cond_width = int(width * H.bottleneck_multiple)
         
         if self.mixin is not None:
-            self.unpool = Unpoolayer(width, width, res, mixin)
+            self.unpool = UnpoolLayer(width, width, res, mixin)
             
         
         self.zdim = H.zdim
@@ -418,47 +423,51 @@ class VAE(HModule):
         #     out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
         # else:
         #     raise NotImplementedError
-        '''
+        
         out_dict = self.decoder.out_net.gaussian_nll(x, px_z, "learned")
         
         # print(f'mse : {out_dict['mse']}')
         nll = out_dict['nll'].sum(dim=(1,2))
         
         kl_dist = torch.zeros_like(nll) 
-        kl_list = []
         
         for statdict in stats:
             # print(statdict['kl'].shape)
             kl_dist += statdict['kl'].sum(dim=(1,2))
         
-        elbo = (-nll - kl_dist)
-        '''
+        # elbo = (-nll - kl_dist)
+        ''''''
         H_prior = H_dec = H_enc = 0
         '''
         px_z_loc, px_z_logscale = self.decoder.out_net(px_z).chunk(2, dim=1)
-        p_z_distr = torch.distributions.Normal(torch.zeros_like(px_z_loc), torch.ones_like(px_z_logscale))
+        # p_z_distr = torch.distributions.Normal(torch.zeros_like(px_z_loc), torch.ones_like(px_z_logscale))
         px_z_distr = torch.distributions.Normal(px_z_loc, torch.exp(px_z_logscale))
         qz_x_distr = torch.distributions.Normal(stats[0]['qm'], torch.exp(stats[0]['qv']))
         
         # Calculate Three Entropies
-        H_prior = p_z_distr.entropy().sum((1,2))  # sum over latent dims
-        H_enc = qz_x_distr.entropy().sum((1,2))  # mean over batch, sum over latent dims
-        H_dec = px_z_distr.entropy().sum((1,2))  # mean over batch, sum over data dims
-        elbo = - H_prior - H_dec + H_enc
-        '''
-        px_z_loc, px_z_logscale = self.decoder.out_net(px_z).chunk(2, dim=1)
-        px_z_distr = torch.distributions.Normal(px_z_loc, torch.exp(px_z_logscale))
-        H_dec += px_z_distr.entropy().sum((1,2))  # mean over batch, sum over data dims
         for stat in stats:
-            p_z_distr = torch.distributions.Normal(torch.zeros_like(stat['qm']), torch.ones_like(stat['qv']))
+            p_z_distr = torch.distributions.Normal(stat['pm'], torch.exp(stat['pv']))
             qz_x_distr = torch.distributions.Normal(stat['qm'], torch.exp(stat['qv']))
             
             # Calculate Three Entropies
             H_prior += p_z_distr.entropy().sum((1,2))  # sum over latent dims
             H_enc += qz_x_distr.entropy().sum((1,2))  # mean over batch, sum over latent dims
-        H_prior *= 2    
+        H_dec = px_z_distr.entropy().sum((1,2))  # mean over batch, sum over data dims
         elbo = - H_prior - H_dec + H_enc
+        '''
+        # out_dict = self.decoder.out_net.gaussian_nll(x, px_z, "learned")
+        # print(f'-H_prior {-H_prior}')
+        # print(f'rec {- H_dec}')
+        # nll = out_dict['nll'].sum(dim=(1,2))
+        # print(f'nll {nll}')
+        # kl_dist = torch.zeros_like(nll) 
         
+        # for statdict in stats:
+        #     kl_dist += statdict['kl'].sum(dim=(1,2))
+        # print(f'kl_dist {kl_dist}')    
+        # print(f'- H_prior + H_enc {- H_prior + H_enc}')
+        # print(f'elbo {elbo} {-nll - kl_dist}')
+        elbo = - H_prior - H_dec + kl_dist
         return elbo
 
 
@@ -469,7 +478,7 @@ class OutPutNet(nn.Module):
         self.H = H
         self.width = H.width
         self.softplus = nn.Softplus(beta=H.gradient_smoothing_beta) # ln(2) ~= 0.6931472.
-        self.out_conv = get_conv(H.width, H.image_channels * 2, kernel_size=1, stride=1, padding=0) # loc and scale
+        self.out_conv = Conv1DLayer(H.width, H.image_channels * 2, kernel_size=1, stride=1, padding=0) # loc and scale
 
     def gaussian_nll(self, x, px_z, std_mode):
         mu, logstd = self.forward(px_z).chunk(2, dim=1)
@@ -529,7 +538,7 @@ class OutPutNet(nn.Module):
         
         plus_in = inv_stdv * (centered_x + self.H.shift)
         cdf_plus = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(plus_in)
-        min_in = inv_stdv * (centered_x - self.H.shift)
+        min_in = inv_stdv * (centered_x)
         cdf_min = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(min_in)
         
         log_cdf_plus = torch.log(cdf_plus)
