@@ -51,8 +51,8 @@ def set_up_data(H):
         data_max = data_max_ + 2 * shift 
         data_min = data_min_ - 2 * shift
         
-    H.shift = (shift / (data_max - data_min)).float()
-    H.sigma = (H.shift).float()
+    H.sigma = (shift / (data_max - data_min)).float()
+    H.shift = (H.sigma).float()
     print(f'shift {H.shift}')
 
     def preprocess_func(x):

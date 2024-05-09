@@ -79,7 +79,8 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
             iterate += 1
             iters_since_starting += 1
             
-            if iterate % H.iters_per_save == 0 and H.rank == 0:
+            # if iterate % H.iters_per_save == 0 and H.rank == 0:
+            if iterate % H.iters_per_save == 0:
                 if np.isfinite(stats[-1]['nelbo']):
                     logprint(model=H.desc, type='train_loss', epoch=epoch, step=iterate, **accumulate_stats(stats, H.iters_per_print))
                     fp = os.path.join(H.save_dir, 'latest')

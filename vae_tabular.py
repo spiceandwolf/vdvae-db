@@ -377,7 +377,7 @@ class VAE(HModule):
             raise NotImplementedError
         
         nll = out_dict['nll'].sum(dim=(1,2))
-        mse = out_dict['mse'].sum(dim=(1,2))
+        mse = out_dict['mse'].max()
         kl_dist = torch.zeros_like(nll) 
         kl_list = []
         
@@ -388,7 +388,7 @@ class VAE(HModule):
         
         # nelbo = (ll + kl_dist).mean()
         nelbo = (nll + kl_dist)
-        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl_dist.mean(), mse=mse.mean()), kl_list
+        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl_dist.mean(), mse=mse), kl_list
 
     def forward_get_latents(self, x):
         activations = self.encoder.forward(x)
@@ -435,39 +435,29 @@ class VAE(HModule):
             # print(statdict['kl'].shape)
             kl_dist += statdict['kl'].sum(dim=(1,2))
         
-        # elbo = (-nll - kl_dist)
+        analysis_elbo = (-nll - kl_dist)
         ''''''
         H_prior = H_dec = H_enc = 0
-        '''
+        ''''''
+        # Calculate Three Entropies
         px_z_loc, px_z_logscale = self.decoder.out_net(px_z).chunk(2, dim=1)
         # p_z_distr = torch.distributions.Normal(torch.zeros_like(px_z_loc), torch.ones_like(px_z_logscale))
         px_z_distr = torch.distributions.Normal(px_z_loc, torch.exp(px_z_logscale))
-        qz_x_distr = torch.distributions.Normal(stats[0]['qm'], torch.exp(stats[0]['qv']))
+        H_dec = px_z_distr.entropy().sum((1,2))  # mean over batch, sum over data dims
         
-        # Calculate Three Entropies
         for stat in stats:
             p_z_distr = torch.distributions.Normal(stat['pm'], torch.exp(stat['pv']))
             qz_x_distr = torch.distributions.Normal(stat['qm'], torch.exp(stat['qv']))
             
-            # Calculate Three Entropies
             H_prior += p_z_distr.entropy().sum((1,2))  # sum over latent dims
             H_enc += qz_x_distr.entropy().sum((1,2))  # mean over batch, sum over latent dims
-        H_dec = px_z_distr.entropy().sum((1,2))  # mean over batch, sum over data dims
-        elbo = - H_prior - H_dec + H_enc
-        '''
-        # out_dict = self.decoder.out_net.gaussian_nll(x, px_z, "learned")
-        # print(f'-H_prior {-H_prior}')
-        # print(f'rec {- H_dec}')
-        # nll = out_dict['nll'].sum(dim=(1,2))
-        # print(f'nll {nll}')
-        # kl_dist = torch.zeros_like(nll) 
         
-        # for statdict in stats:
-        #     kl_dist += statdict['kl'].sum(dim=(1,2))
-        # print(f'kl_dist {kl_dist}')    
-        # print(f'- H_prior + H_enc {- H_prior + H_enc}')
-        # print(f'elbo {elbo} {-nll - kl_dist}')
-        elbo = - H_prior - H_dec + kl_dist
+        entropies_elbo = - H_prior - H_dec + H_enc
+        
+        # print(f'analysis_elbo {analysis_elbo} entropies_elbo {entropies_elbo}')
+        
+        hybird_elbo = - H_dec - kl_dist
+        elbo = analysis_elbo
         return elbo
 
 
@@ -484,8 +474,8 @@ class OutPutNet(nn.Module):
         mu, logstd = self.forward(px_z).chunk(2, dim=1)
         if std_mode == 'learned':
             # logstd = softclip(logstd)
-            mse = 0.5 * torch.pow((x - mu), 2)
-            nll = mse / logstd.exp() ** 2 + logstd + 0.5 * np.log(2 * np.pi)
+            mse = 0.5 * torch.pow((x - mu) / logstd.exp(), 2)
+            nll = mse + logstd + 0.5 * np.log(2 * np.pi)
             return dict(nll=nll, mse=mse) 
         
         elif std_mode == 'batch':
@@ -536,7 +526,7 @@ class OutPutNet(nn.Module):
         centered_x = x - loc
         inv_stdv = torch.exp(-log_scale)
         
-        plus_in = inv_stdv * (centered_x + self.H.shift)
+        plus_in = inv_stdv * (centered_x + self.H.shift * 2)
         cdf_plus = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(plus_in)
         min_in = inv_stdv * (centered_x)
         cdf_min = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(min_in)
@@ -547,7 +537,7 @@ class OutPutNet(nn.Module):
         cdf_delta = cdf_plus - cdf_min
 
         log_probs = torch.where(x < -thres, log_cdf_plus,
-                        torch.where(x > thres, log_one_minus_cdf_min, torch.log(softclip(cdf_delta, min=1e-100))))
+                        torch.where(x > thres, log_one_minus_cdf_min, torch.log(softclip(cdf_delta, min=1e-7))))
 
         return log_probs
     
@@ -555,7 +545,7 @@ class OutPutNet(nn.Module):
         mu, logstd = self.forward(px_z).chunk(2, dim=1)
         crit = torch.nn.MSELoss(reduction='none')
         pred_x = draw_gaussian_diag_samples(mu, logstd)
-        mse = crit(pred_x, x)
+        mse = crit(pred_x, x) / (self.H.shift * 2 ** 2)
         
         nll = -self.discretized_gaussian_log_likelihood(x, mu, logstd)
         return dict(nll=nll, mse=mse)
