@@ -286,11 +286,7 @@ def run_test_reconstruct(H, model, data_valid_or_test, preprocess_fn, logprint):
 
 def train_ray_tune(config, H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint):
     H.n_batch = int(config["n_batch"])
-    n_layer_1 = config["n_layer_1"]
-    n_layer_3 = config["n_layer_3"]
-    n_layer_7 = config["n_layer_7"]
-    H.dec_blocks = f"1x{n_layer_1},3m1,3x{n_layer_3},7m3,7x{n_layer_7}"
-    H.enc_blocks = f"7x{n_layer_7},7d2,3x{n_layer_3},3d2,1x{n_layer_1}"
+    H.lr = config["lr"]
     vae, ema_vae = load_vaes(H, logprint)
     for i, k in enumerate(sorted(H)):
         if not isinstance(H[k], torch.Tensor):
@@ -308,8 +304,7 @@ def train_ray_tune(config, H, data_train, data_valid_or_test, preprocess_fn, vae
         checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
         train.report(
             {"n_batch": int(config["n_batch"]),
-             "dec_blocks": H.dec_blocks,
-             "enc_blocks": H.enc_blocks,
+             "lr": config["lr"],
              "mse": result["mse"],
              "nelbo": result["nelbo"],
              },
@@ -367,9 +362,7 @@ def main():
         # ray config
         config = {
             "n_batch" : tune.choice([1024, 2048, 4096, 8192]),
-            "n_layer_1" : tune.randint(1, 9),
-            "n_layer_3" : tune.randint(1, 9),
-            "n_layer_7" : tune.randint(1, 9),
+            "lr" : tune.loguniform(1e-5, 5e-2)
         }
         
         ray.init()
@@ -380,7 +373,7 @@ def main():
             reduction_factor=2)
         
         ray_result_dict = "results/power_tuning/"
-        ray_result_name = "n_batch_dec_enc"
+        ray_result_name = "n_batch_lr"
         
         if H.tuning_recover:
             tuner = tune.Tuner.restore(
@@ -403,7 +396,7 @@ def main():
                     metric="mse",
                     mode="min",
                     scheduler=tuning_scheduler,
-                    num_samples=24,
+                    num_samples=16,
                 ),
                 run_config=ray.train.RunConfig(
                     name=ray_result_name,
@@ -413,11 +406,6 @@ def main():
         
         results = tuner.fit()
         best_result = results.get_best_result("mse", "min")
-        n_layer_1 = best_result.config['n_layer_1']
-        n_layer_3 = best_result.config['n_layer_3']
-        n_layer_7 = best_result.config['n_layer_7']
-        H.dec_blocks = f"1x{n_layer_1},3m1,3x{n_layer_3},7m3,7x{n_layer_7}"
-        H.enc_blocks = f"7x{n_layer_7},7d2,3x{n_layer_3},3d2,1x{n_layer_1}"
         best_vae, _ = load_vaes(H, logprint)
         with best_result.checkpoint.as_directory() as checkpoint_dir:
             # The model state dict was saved under `model.pt` by the training function

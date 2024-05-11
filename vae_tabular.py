@@ -457,7 +457,7 @@ class VAE(HModule):
         # print(f'analysis_elbo {analysis_elbo} entropies_elbo {entropies_elbo}')
         
         hybird_elbo = - H_dec - kl_dist
-        elbo = analysis_elbo
+        elbo = hybird_elbo
         return elbo
 
 
@@ -530,14 +530,9 @@ class OutPutNet(nn.Module):
         cdf_plus = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(plus_in)
         min_in = inv_stdv * (centered_x)
         cdf_min = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(min_in)
-        
-        log_cdf_plus = torch.log(cdf_plus)
-        log_one_minus_cdf_min = torch.log(1. - cdf_min)
-        
         cdf_delta = cdf_plus - cdf_min
 
-        log_probs = torch.where(x < -thres, log_cdf_plus,
-                        torch.where(x > thres, log_one_minus_cdf_min, torch.log(softclip(cdf_delta, min=1e-7))))
+        log_probs = torch.log(softclip(cdf_delta, min=1e-7))
 
         return log_probs
     
@@ -545,7 +540,7 @@ class OutPutNet(nn.Module):
         mu, logstd = self.forward(px_z).chunk(2, dim=1)
         crit = torch.nn.MSELoss(reduction='none')
         pred_x = draw_gaussian_diag_samples(mu, logstd)
-        mse = crit(pred_x, x) / (self.H.shift * 2 ** 2)
+        mse = crit(pred_x, x) / (self.H.shift * 2) ** 2
         
         nll = -self.discretized_gaussian_log_likelihood(x, mu, logstd)
         return dict(nll=nll, mse=mse)
