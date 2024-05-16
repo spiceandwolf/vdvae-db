@@ -44,16 +44,6 @@ def set_up_data(H):
         H.image_channels = 3
         shift = -120.63838
         scale = 1. / 64.16736
-    elif H.dataset == 'power':
-        H.pad_value = [0.] * H.width
-        if H.noise_value is not None:
-            for i, ss in enumerate(H.noise_value.split(',')):
-                H.pad_value[i] = float(ss)
-        trX, vaX, teX = power(H.data_root, H.pad_value)
-        H.image_size = 7
-        H.image_channels = 1
-        shift = -120.63838
-        scale = 1. / 64.16736
     else:
         raise ValueError('unknown dataset: ', H.dataset)
 

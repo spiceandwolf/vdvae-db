@@ -8,10 +8,10 @@ import ray.train
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 # from torch.utils.data.distributed import DistributedSampler
-from data_tabular import set_up_data
+from data_tabular import Discretized_data, set_up_data
 from utils import get_cpu_stats_over_ranks
 from train_helpers_tabular import set_up_hyperparams, load_vaes, load_opt, accumulate_stats, save_model, update_ema, update_hparams
-from my_utils import Card, ErrorMetric, GenerateQuery, make_point_raw, make_points, estimate_probabilities, test_integrate
+from my_utils import Card, ErrorMetric, GenerateQuery, Query, make_point_raw, make_points, estimate_probabilities, test_integrate
 from torch.utils.tensorboard import SummaryWriter
 import tempfile
 from ray import train, tune
@@ -174,6 +174,10 @@ def run_test_eval(H, ema_vae, data_test, preprocess_fn, logprint):
 def run_query_test_eval(H, model, table_data, pad_value, logprint):
     print('evaluating')
     n_rows = table_data.shape[0] - int(table_data.shape[0] * 0.1) 
+    name_to_index = {c: i for i, c in enumerate(table_data.columns)}
+    columns_info = [dict([('col', col), 
+                        ('all_distinct_values', np.sort(table_data[col].unique())),]) 
+                            for col in table_data.columns]
     
     qerrors = []
     dim = H.width
@@ -190,42 +194,51 @@ def run_query_test_eval(H, model, table_data, pad_value, logprint):
         predicates = []
         for c, o, v in zip(cols, ops, vals):
             predicates.append((c, o, v))
+        
+        if H.discrete:
+            samples = Query(name_to_index, columns_info, cols, ops, vals, model, 1000)
+            discretizer = Discretized_data(table_data, np.array(H.pad_value) * 2, H.encoding_lists)
+            integration_domain = discretizer.encode_data(samples)
+            print(predicates)
+            print(f'integration_domain[0]: {integration_domain[0]}')
             
-        left_bounds = {}
-        right_bounds = {}
-        bias = {}
-        
-        for idx, attr in enumerate(table_data.columns):
-            col_name = attr
-                    
-            if H.noise_type == 'uniform':
-                left_bounds[col_name] = table_data[attr].min()
-                right_bounds[col_name] = table_data[attr].max() + 2 * pad_value[idx]
-            elif H.noise_type == 'gaussian':
-                left_bounds[col_name] = table_data[attr].min() - pad_value[idx]
-                right_bounds[col_name] = table_data[attr].max() + pad_value[idx]
-            else:
-                left_bounds[col_name] = table_data[attr].min()
-                right_bounds[col_name] = table_data[attr].max()
-            bias[col_name] = pad_value[idx] 
-        table_stats = (table_data.columns, right_bounds, left_bounds)
-        
-        # print(predicates)
-        # integration_domain = make_point_raw(table_data.columns, predicates, statistics, noise)
-        integration_domain = make_points(table_stats, predicates, bias, H.noise_type)
-        
-        # print(integration_domain)
-        
-        prob = estimate_probabilities(model, integration_domain, dim)
+        else:    
+            left_bounds = {}
+            right_bounds = {}
+            bias = {}
+            
+            for idx, attr in enumerate(table_data.columns):
+                col_name = attr
+                        
+                if H.noise_type == 'uniform':
+                    left_bounds[col_name] = table_data[attr].min()
+                    right_bounds[col_name] = table_data[attr].max() + 2 * pad_value[idx]
+                elif H.noise_type == 'gaussian':
+                    left_bounds[col_name] = table_data[attr].min() - pad_value[idx]
+                    right_bounds[col_name] = table_data[attr].max() + pad_value[idx]
+                else:
+                    left_bounds[col_name] = table_data[attr].min()
+                    right_bounds[col_name] = table_data[attr].max()
+                bias[col_name] = pad_value[idx] 
+            table_stats = (table_data.columns, right_bounds, left_bounds)
+            
+            # print(predicates)
+            # integration_domain = make_point_raw(table_data.columns, predicates, statistics, noise)
+            integration_domain = make_points(table_stats, predicates, bias, H.noise_type)
+            
+            # print(integration_domain)
+            
+        # return
+        prob = estimate_probabilities(model, integration_domain, dim, H.discrete).item()
         
         # print(f'prob: {prob}')
         
-        if  math.isnan(prob.item()) or math.isinf(prob.item()):
+        if  math.isnan(prob) or math.isinf(prob):
             est_card = 1
             count += 1
             
         else:
-            est_card = max(prob.item() * n_rows, 1)
+            est_card = max(prob * n_rows, 1)
             # est_card = max(prob.item(), 1)
             if est_card > n_rows:
                 count += 1
@@ -318,18 +331,9 @@ def main():
     writer = SummaryWriter(f'runs/{H.dataset}_{H.test_name}')
     vae, ema_vae = load_vaes(H, logprint)
     '''
-    data = select_n_random(data_train, labels=None, n=4)
-    
-    test = torch.tensor([[[0.076, 0.0, 223.2, 0.2, 0.0, 0.0, 0.0]]]).cuda()
-    _, test = preprocess_fn(test)
-    print(f'test {test}')
-    
-    features = torch.cat([row for row in data], dim=0).view(-1, 7)
-    writer.add_embedding(features)
-    
-    for name, paras in vae.named_parameters():
-        logprint(name)
-        logprint(f'{paras}')
+    print(f'data_input {original_data.loc[int(original_data.shape[0] * 0.1)]}')
+    target, data_input = preprocess_fn(data_train[0])
+    print(f'data_input[0] {data_input[0]}')
     return
     '''
     if H.test_eval:
@@ -411,8 +415,7 @@ def main():
             # The model state dict was saved under `model.pt` by the training function
             best_vae.load_state_dict(torch.load(os.path.join(checkpoint_dir, "checkpoint.pt"))["model"])
             run_query_test_eval(H, best_vae, original_data, H.pad_value, logprint)
-        
-        
+             
     elif H.train:
         for i, k in enumerate(sorted(H)):
             if not isinstance(H[k], torch.Tensor):

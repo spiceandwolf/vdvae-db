@@ -367,14 +367,17 @@ class VAE(HModule):
         activations = self.encoder.forward(x)
         px_z, stats = self.decoder.forward(activations)
         
-        if self.H.out_net_mode == 'gaussian':
-            out_dict = self.decoder.out_net.gaussian_nll(x, px_z, self.H.std_mode)
-        elif self.H.out_net_mode == 'mse':
-            out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
-        elif self.H.out_net_mode == 'discretized_gaussian':
-            out_dict = self.decoder.out_net.discretized_gaussian_nll(x, px_z)
+        if self.H.discrete == True:
+            out_dict = self.decoder.out_net.bernoulli_nll(x, px_z)
         else:
-            raise NotImplementedError
+            if self.H.out_net_mode == 'gaussian':
+                out_dict = self.decoder.out_net.gaussian_nll(x, px_z, self.H.std_mode)
+            elif self.H.out_net_mode == 'mse':
+                out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
+            elif self.H.out_net_mode == 'discretized_gaussian':
+                out_dict = self.decoder.out_net.discretized_gaussian_nll(x, px_z)
+            else:
+                raise NotImplementedError
         
         nll = out_dict['nll'].sum(dim=(1,2))
         mse = out_dict['mse'].max()
@@ -417,14 +420,17 @@ class VAE(HModule):
         # print(activations.keys())
         px_z, stats = self.decoder.forward(activations)
         
-        # if self.H.out_net_mode == 'gaussian':
-        #     out_dict = self.decoder.out_net.gaussian_nll(x, px_z, self.H.std_mode)
-        # elif self.H.out_net_mode == 'mse':
-        #     out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
-        # else:
-        #     raise NotImplementedError
-        
-        out_dict = self.decoder.out_net.gaussian_nll(x, px_z, "learned")
+        if self.H.discrete == True:
+            out_dict = self.decoder.out_net.bernoulli_nll(x, px_z)
+        else:
+            if self.H.out_net_mode == 'gaussian':
+                out_dict = self.decoder.out_net.gaussian_nll(x, px_z, self.H.std_mode)
+            elif self.H.out_net_mode == 'mse':
+                out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
+            elif self.H.out_net_mode == 'discretized_gaussian':
+                out_dict = self.decoder.out_net.discretized_gaussian_nll(x, px_z)
+            else:
+                raise NotImplementedError
         
         # print(f'mse : {out_dict['mse']}')
         nll = out_dict['nll'].sum(dim=(1,2))
@@ -438,7 +444,7 @@ class VAE(HModule):
         analysis_elbo = (-nll - kl_dist)
         ''''''
         H_prior = H_dec = H_enc = 0
-        ''''''
+        '''
         # Calculate Three Entropies
         px_z_loc, px_z_logscale = self.decoder.out_net(px_z).chunk(2, dim=1)
         # p_z_distr = torch.distributions.Normal(torch.zeros_like(px_z_loc), torch.ones_like(px_z_logscale))
@@ -457,7 +463,8 @@ class VAE(HModule):
         # print(f'analysis_elbo {analysis_elbo} entropies_elbo {entropies_elbo}')
         
         hybird_elbo = - H_dec - kl_dist
-        elbo = hybird_elbo
+        '''
+        elbo = analysis_elbo
         return elbo
 
 
@@ -468,7 +475,7 @@ class OutPutNet(nn.Module):
         self.H = H
         self.width = H.width
         self.softplus = nn.Softplus(beta=H.gradient_smoothing_beta) # ln(2) ~= 0.6931472.
-        self.out_conv = Conv1DLayer(H.width, H.image_channels * 2, kernel_size=1, stride=1, padding=0) # loc and scale
+        self.out_conv = Conv1DLayer(H.width, H.image_channels * 2 if H.discrete != True else 1, kernel_size=1, stride=1, padding=0) # loc and scale
 
     def gaussian_nll(self, x, px_z, std_mode):
         mu, logstd = self.forward(px_z).chunk(2, dim=1)
@@ -520,7 +527,7 @@ class OutPutNet(nn.Module):
         else:
             raise NotImplementedError
         
-    def discretized_gaussian_log_likelihood(self, x, loc, log_scale, thres = 1):
+    def discretized_gaussian_log_likelihood(self, x, loc, log_scale):
         assert x.shape == loc.shape == log_scale.shape
         
         centered_x = x - loc
@@ -544,6 +551,19 @@ class OutPutNet(nn.Module):
         
         nll = -self.discretized_gaussian_log_likelihood(x, mu, logstd)
         return dict(nll=nll, mse=mse)
+    
+    def bernoulli_nll(self, x, px_z):
+        logits = self.forward(px_z)
+        probs = torch.sigmoid(logits)
+
+        bernoulli = torch.distributions.Bernoulli(probs)
+        nll = - bernoulli.log_prob(x)
+        
+        x_rec = torch.empty_like(logits).bernoulli_(probs)
+        crit = torch.nn.CrossEntropyLoss(reduction='none')
+        ce = crit(x, x_rec)
+        
+        return dict(nll=nll, mse=ce)
 
     def forward(self, px_z):
         xhat = self.out_conv(px_z)

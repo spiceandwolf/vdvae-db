@@ -16,22 +16,23 @@ class Hyperparams(dict):
 power = Hyperparams()
 power.width = 7
 power.min_lr = 1e-6
-power.zdim = 7
+power.zdim = 14
 power.wd = 0.
 # power.dec_blocks = "1x1,4m1,4x1,7m4,7x1" # x corresponds to residual block, m corresponds to unpool layer
 # power.enc_blocks = "7x1,7d2,4x1,4d4,1x1" # x corresponds to residual block, d corresponds to pool layer
 power.warmup_iters = 32
 power.dataset = 'power'
-power.n_batch = 1024
+power.n_batch = 2048
 power.ema_rate = 0.9999
-power.data_root = '/home/user1/QOlab/dataset/'
+power.data_root = '/home/user/oblab/dataset/'
 power.num_epochs = 40
 power.desc = 'power_test'
 power.skip_threshold = -1.
 power.grad_clip = 30000
-power.noise_value = '0.0005, 0.0005, 0.005, 0.05, 0.5, 0.5, 0.5'
-power.decay_iters = 72000
+power.decay_iters = 36000
 power.decay_start = 32
+power.noise_value = '0.0005, 0.0005, 0.005, 0.05, 0.5, 0.5, 0.5'
+power.encoding_modes = 'binary,binary,binary,binary,binary,binary,binary'
 HPARAMS_REGISTRY['power'] = power
 
 def parse_args_and_update_hparams(H, parser, s=None):
@@ -117,5 +118,7 @@ def add_vae_arguments(parser):
     parser.add_argument('--remarks', type=str, default='')
     parser.add_argument('--train_ray_tune', action="store_true")
     parser.add_argument('--tuning_recover', action="store_true")
+    parser.add_argument('--discrete', action="store_true")
+    parser.add_argument('--encoding_modes', type=str, default='')
     
     return parser

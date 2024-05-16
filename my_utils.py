@@ -1,5 +1,6 @@
 import csv
 import os
+import random
 import numpy as np
 import pandas as pd
 import torch
@@ -121,28 +122,34 @@ def make_point_raw(attrs, predicates, statistics, bias, alias2table=None):
     return integration_domain
 
 
-def estimate_probabilities(model, integration_domain, dim):
+def estimate_probabilities(model, integration_domain, dim, isdiscrete = False):
     integration_domain = torch.Tensor(integration_domain).cuda()
     
-    set_up_backend("torch", data_type="float32")
-    def multivariate_normal(x):
-        x = x.reshape(-1, 1, x.shape[1])
-        # print(f'x:{x}')
-        with torch.no_grad():
-            # elbo = model.modules.elbo(x)
-            elbo = model.elbo(x)
-            prob_list = torch.exp(elbo)
-            return prob_list
+    if isdiscrete:
+        x = x.reshape(-1, 1, integration_domain.shape[1])
+        prob = torch.exp(model.elbo(x)).sum()
+    
+    else:
+        set_up_backend("torch", data_type="float32")
+        def multivariate_normal(x):
+            x = x.reshape(-1, 1, x.shape[1])
+            # print(f'x:{x}')
+            with torch.no_grad():
+                # elbo = model.modules.elbo(x)
+                elbo = model.elbo(x)
+                prob_list = torch.exp(elbo)
+                return prob_list
+            
+        integrater = MonteCarlo()
+        # integrater = VEGAS()
+        prob = integrater.integrate(
+            multivariate_normal,
+            dim=dim,
+            N=10000,
+            integration_domain=integration_domain,
+            backend="torch",
+            )   
         
-    integrater = MonteCarlo()
-    # integrater = VEGAS()
-    prob = integrater.integrate(
-        multivariate_normal,
-        dim=dim,
-        N=10000,
-        integration_domain=integration_domain,
-        backend="torch",
-        )   
     return prob
 
 
@@ -267,6 +274,38 @@ def Card(table, columns, operators, vals):
             bools &= inds
     c = bools.sum()
     return c
+
+
+def FillInUnqueriedColumns(name_to_index, columns, operators, vals):
+    ncols = len(name_to_index)
+    cs = name_to_index.values
+    os, vs = [None] * ncols, [None] * ncols
+
+    for c, o, v in zip(columns, operators, vals):
+        idx = name_to_index[c]
+        os[idx] = o
+        vs[idx] = v
+
+    return cs, os, vs
+
+
+def Query(name_to_index, columns_info, columns, operators, vals, n_samples):
+        columns, operators, vals = FillInUnqueriedColumns(name_to_index, columns, operators, vals)
+
+        all_samples = []
+        for column_info, op, val in zip(columns_info, operators, vals):
+            if op is not None:
+                valid = OPS[op](column_info['all_distinct_values'], val)
+            else:
+                valid = [True] * len(column_info['all_distinct_values'])
+            
+            selected_idx = [i for i, selected in enumerate(valid) if selected]
+            samples = random.sample(selected_idx, n_samples)
+            all_samples.append(samples)
+        all_samples = np.asarray(all_samples).T
+
+        return all_samples
+
 
 if __name__ == "__main__":
     data_root = '~/QOlab/dataset/'
