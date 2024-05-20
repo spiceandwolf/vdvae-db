@@ -7,6 +7,7 @@ from torch.utils.data import TensorDataset
 
 def set_up_data(H):
     untranspose = False
+    discretizer = None
     
     if H.discrete:
         if H.dataset == 'power':
@@ -29,7 +30,7 @@ def set_up_data(H):
         
         discretizer = Discretized_data(original_data, shift, encoding_modes)
         discretized_data = discretizer.encode_data(original_data.values)
-        H.image_size = discretized_data.shape[-1]
+        H.image_size = int(sum(discretizer.dist_sizes))
         H.image_channels = 1
         
         split_index = int(original_data.shape[0] * 0.1)
@@ -148,7 +149,7 @@ def set_up_data(H):
         
         return inp.float(), out.float()
 
-    return H, train_data, valid_data, preprocess_func, original_data
+    return H, train_data, valid_data, preprocess_func, original_data, discretizer
 
 
 def mkdir_p(path):
@@ -171,6 +172,7 @@ class Discretized_data:
     def __init__(self, data, bin_sizes, encoding_modes) -> None:
         self.bin_sizes = bin_sizes
         self.encoding_modes = encoding_modes
+        self.mins = data.min().values
         self.dist_sizes = self._get_data_encoded_dist_size(data.max().values, data.min().values, bin_sizes)
         
     def _get_data_encoded_dist_size(self, maxs, mins, bin_sizes):
@@ -192,9 +194,9 @@ class Discretized_data:
         dist_start = 0
         for i, encoding_info in enumerate(zip(self.dist_sizes, self.encoding_modes)):
             dist_size, encoding_mode = encoding_info 
+            
             if encoding_mode == 'binary':
-                min = x[:, i].min()
-                col = np.int64((x[:, i] - min) / self.bin_sizes[i])
+                col = np.int64((x[:, i] - self.mins[i]) / self.bin_sizes[i])
                 bin_col = []
                 for item in col:
                     bin_items = [int(bin_item) for bin_item in bin(item)[2:]] 
@@ -205,6 +207,9 @@ class Discretized_data:
                 data[:, dist_start : dist_start + int(dist_size)] |= np.array(bin_col)
             
             elif encoding_mode == 'onehot':
+                '''
+                incomplete
+                '''
                 assert x[:, ..., i] <= self.bin_sizes[i]
                 data[dist_start + x[:, ..., i]] = 1
                 

@@ -126,7 +126,7 @@ def estimate_probabilities(model, integration_domain, dim, isdiscrete = False):
     integration_domain = torch.Tensor(integration_domain).cuda()
     
     if isdiscrete:
-        x = x.reshape(-1, 1, integration_domain.shape[1])
+        x = integration_domain.reshape(-1, 1, integration_domain.shape[1])
         prob = torch.exp(model.elbo(x)).sum()
     
     else:
@@ -300,8 +300,9 @@ def Query(name_to_index, columns_info, columns, operators, vals, n_samples):
                 valid = [True] * len(column_info['all_distinct_values'])
             
             selected_idx = [i for i, selected in enumerate(valid) if selected]
-            samples = random.sample(selected_idx, n_samples)
-            all_samples.append(samples)
+            samples = np.random.choice(selected_idx, n_samples)
+            # print([column_info['all_distinct_values'][sample] for sample in samples][0:10])
+            all_samples.append([column_info['all_distinct_values'][sample] for sample in samples])
         all_samples = np.asarray(all_samples).T
 
         return all_samples

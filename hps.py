@@ -25,7 +25,7 @@ power.dataset = 'power'
 power.n_batch = 2048
 power.ema_rate = 0.9999
 power.data_root = '/home/user/oblab/dataset/'
-power.num_epochs = 40
+power.num_epochs = 20
 power.desc = 'power_test'
 power.skip_threshold = -1.
 power.grad_clip = 30000
@@ -120,5 +120,6 @@ def add_vae_arguments(parser):
     parser.add_argument('--tuning_recover', action="store_true")
     parser.add_argument('--discrete', action="store_true")
     parser.add_argument('--encoding_modes', type=str, default='')
+    parser.add_argument('--vae_type', type=str, default='')
     
     return parser

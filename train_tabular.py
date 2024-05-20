@@ -27,7 +27,7 @@ def training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, ite
     with autograd.set_detect_anomaly(True):
         t0 = time.time()
         vae.zero_grad()
-        stats, kl_list = vae.forward(data_input, target)
+        stats, bottom_qv = vae.forward(data_input, target)
         stats['nelbo'].backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), H.grad_clip).item()
         recon_nans = torch.isnan(stats['recon']).sum()
@@ -45,7 +45,7 @@ def training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, ite
 
         t1 = time.time()
         stats.update(skipped_updates=skipped_updates, iter_time=t1 - t0, grad_norm=grad_norm)
-        return stats, kl_list
+        return stats, bottom_qv
 
 
 def eval_step(data_input, target, ema_vae):
@@ -69,7 +69,7 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
         for x in DataLoader(data_train, batch_size=H.n_batch, drop_last=True, pin_memory=True, sampler=train_sampler):
             target, data_input = preprocess_fn(x)
             # print(f'target {target[0].dtype} data_input {data_input[0].dtype}')
-            training_stats, kl_list = training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, iterate)
+            training_stats, bottom_qv = training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, iterate)
             stats.append(training_stats)
             # scheduler.step() # `optimizer.step()`should be called before `lr_scheduler.step()`.
             if iterate % H.iters_per_print == 0 or iters_since_starting in early_evals:
@@ -113,9 +113,10 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
             writer.add_scalar('train_kl', training_stats['kl_dist'], epoch)
             writer.add_scalar('train_nelbo', training_stats['nelbo'], epoch)
             writer.add_scalar('train_mse', training_stats['mse'], epoch)
+            writer.add_histogram('bottom_qv', bottom_qv, epoch)
         
-            for i, kl in enumerate(kl_list):
-                writer.add_scalar(f'train_layer_{i}_kl', kl, epoch)
+            # for i, kl in enumerate(kl_list):
+            #     writer.add_scalar(f'train_layer_{i}_kl', kl, epoch)
             
         # break
             
@@ -171,7 +172,7 @@ def run_test_eval(H, ema_vae, data_test, preprocess_fn, logprint):
     logprint(type='test_loss', **stats)
 
 
-def run_query_test_eval(H, model, table_data, pad_value, logprint):
+def run_query_test_eval(H, model, table_data, pad_value, logprint, discretizer=None):
     print('evaluating')
     n_rows = table_data.shape[0] - int(table_data.shape[0] * 0.1) 
     name_to_index = {c: i for i, c in enumerate(table_data.columns)}
@@ -196,11 +197,12 @@ def run_query_test_eval(H, model, table_data, pad_value, logprint):
             predicates.append((c, o, v))
         
         if H.discrete:
-            samples = Query(name_to_index, columns_info, cols, ops, vals, model, 1000)
+            samples = Query(name_to_index, columns_info, cols, ops, vals, 2000)
             discretizer = Discretized_data(table_data, np.array(H.pad_value) * 2, H.encoding_lists)
             integration_domain = discretizer.encode_data(samples)
-            print(predicates)
-            print(f'integration_domain[0]: {integration_domain[0]}')
+            # print(predicates)
+            # print(f'integration_domain[0]: {integration_domain[0]}')
+            prob = estimate_probabilities(model, integration_domain, dim, H.discrete).item() / 2000
             
         else:    
             left_bounds = {}
@@ -227,9 +229,10 @@ def run_query_test_eval(H, model, table_data, pad_value, logprint):
             integration_domain = make_points(table_stats, predicates, bias, H.noise_type)
             
             # print(integration_domain)
+            prob = estimate_probabilities(model, integration_domain, dim, H.discrete).item()
             
         # return
-        prob = estimate_probabilities(model, integration_domain, dim, H.discrete).item()
+        
         
         # print(f'prob: {prob}')
         
@@ -327,7 +330,11 @@ def train_ray_tune(config, H, data_train, data_valid_or_test, preprocess_fn, vae
 
 def main():
     H, logprint = set_up_hyperparams()
-    H, data_train, data_valid_or_test, preprocess_fn, original_data = set_up_data(H)
+    discretizer = None
+    if H.discrete:
+        H, data_train, data_valid_or_test, preprocess_fn, original_data, discretizer = set_up_data(H)
+    else:
+        H, data_train, data_valid_or_test, preprocess_fn, original_data = set_up_data(H)
     writer = SummaryWriter(f'runs/{H.dataset}_{H.test_name}')
     vae, ema_vae = load_vaes(H, logprint)
     '''
@@ -342,7 +349,7 @@ def main():
                 logprint(type='hparam', key=k, value=H[k])
         # vae = vae.module
         # run_test_eval(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
-        run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
+        run_query_test_eval(H, vae, original_data, H.pad_value, logprint, discretizer)
         # run_test_integrate(H, ema_vae, logprint)
         # run_test_reconstruct(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
         '''  
@@ -424,7 +431,7 @@ def main():
         
         # run_test_integrate(H, ema_vae, logprint)
         # vae = vae.module
-        run_query_test_eval(H, vae, original_data, H.pad_value, logprint)
+        run_query_test_eval(H, vae, original_data, H.pad_value, logprint, discretizer)
         
     writer.close()
         

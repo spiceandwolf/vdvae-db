@@ -5,20 +5,21 @@ from tqdm import tqdm
 # num_epochs = 30
 learning_rate_list = [2.5e-2]
 operate = ["train", "train_ray_tune", "test_eval"]
-# dec_blocks_list = ["1x2,3m1,3x2,7m3,7x2", "1x5,3m1,3x5,7m3,7x5"]
-dec_blocks_list = ["1x4,3m1,3x8,7m3,7x4"]
-# enc_blocks_list = ["7x2,7d2,3x2,3d2,1x2", "7x5,7d2,3x5,3d2,1x5"]
-enc_blocks_list = ["7x4,7d2,3x8,3d2,1x4"]
+# dec_blocks_list = ["1x2,3m1,3x2,7m3,7x2", "1x5,3m1,3x5,7m3,7x5", "1x4,4m1,4x2,8m4,8x2,16m8,16x2,32m16,32x2,65m32,65x1"]
+dec_blocks_list = ["65x1"]
+# enc_blocks_list = ["7x2,7d2,3x2,3d2,1x2", "7x5,7d2,3x5,3d2,1x5", "65x1,65d2,32x2,32d2,16x2,16d2,8x2,8d2,4x2,4d4,1x4"]
+enc_blocks_list = ["65x1"]
 noise_types = ["None", "uniform", "gaussian"]
 out_net_modes = ["mse", "gaussian", "discretized_gaussian"]
 std_modes = ["learned", "global", "batch"]
 mse_modes = ["guassian", "sigma", "pure"]
 normalize = ["normalize", "minmax"]
-remark = "batch_2048/gaussian_out_net/16_layers/test_entropies_elbo"
+vae_types = ["vanilla_vae", "2_stage_vae", "hvae"]
+remark = "test_discretized_encoding"
 restore_dict_path = "/home/user/oblab/vdvae-db/saved_models/power_test"
 
 count = len(dec_blocks_list)*len(mse_modes)*len(learning_rate_list)
-num = 1
+num = 2
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--test', action="store_true")
@@ -27,6 +28,8 @@ args = parser.parse_args()
 if args.test:
     test_name = "test_" + str(num)
     os.system(f'python train_tabular.py --hps power --remarks {remark} --{operate[2]} '
+                f'--discrete '
+                f'--vae_type {vae_types[0]} '
                 f'--lr {learning_rate_list[0]} '
                 f'--dec_blocks {dec_blocks_list[0]} '
                 f'--enc_blocks {enc_blocks_list[0]} '
@@ -35,7 +38,7 @@ if args.test:
                 # f'--mse_mode {mse_modes[1]} '
                 f'--std_mode {std_modes[0]} '
                 f'--normalize {normalize[1]} '
-                f'--restore_path {restore_dict_path}/{test_name}/best-model.th '
+                f'--restore_path {restore_dict_path}/{test_name}/epoch-20-model.th '
                 f'--test_name {test_name}')
 else:
     with tqdm(total=count) as pbar:
@@ -46,6 +49,8 @@ else:
                     test_name = "test_" + str(num)
                     os.system(f'python train_tabular.py --hps power --remarks {remark} --{operate[0]} '
                                 # f'--tuning_recover '
+                                f'--discrete '
+                                f'--vae_type {vae_types[0]} '
                                 f'--lr {lr} '
                                 f'--dec_blocks {dec_blocks} '
                                 f'--enc_blocks {enc_blocks} '

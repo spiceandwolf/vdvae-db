@@ -230,7 +230,7 @@ class DecBlock(nn.Module):
         # qv = softclip(qv)
         # pv = softclip(pv)
         z = draw_gaussian_diag_samples(qm, qv)
-        kl = gaussian_analytical_kl(qm, pm, qv, pv)
+        kl = gaussian_analytical_kl(qm, pm, qv, pv) if self.H.vae_type == 'hvae' else gaussian_analytical_kl(qm, torch.zeros_like(pm), qv, torch.ones_like(pv))
        
         # qv = self.softplus(qv)
         # pv = self.softplus(pv)
@@ -379,19 +379,20 @@ class VAE(HModule):
             else:
                 raise NotImplementedError
         
-        nll = out_dict['nll'].sum(dim=(1,2))
-        mse = out_dict['mse'].max()
+        nll_axis = list(range(1, len(out_dict['nll'].size())))
+        nll = out_dict['nll'].sum(dim=nll_axis)
+        mse_axis = list(range(1, len(out_dict['mse'].size())))
+        mse = out_dict['mse'].sum(dim=mse_axis)
         kl_dist = torch.zeros_like(nll) 
-        kl_list = []
         
         for statdict in stats:
             # print(statdict['kl'].shape)
-            kl_list.append(statdict['kl'].sum(dim=(1,2)).mean())
             kl_dist += statdict['kl'].sum(dim=(1,2))
         
         # nelbo = (ll + kl_dist).mean()
         nelbo = (nll + kl_dist)
-        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl_dist.mean(), mse=mse), kl_list
+        
+        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl_dist.mean(), mse=mse.mean()), stats[-1]['qv'].mean(dim=(0,2))
 
     def forward_get_latents(self, x):
         activations = self.encoder.forward(x)
@@ -553,16 +554,18 @@ class OutPutNet(nn.Module):
         return dict(nll=nll, mse=mse)
     
     def bernoulli_nll(self, x, px_z):
-        logits = self.forward(px_z)
-        probs = torch.sigmoid(logits)
-
+        probs = self.forward(px_z)
+        probs = torch.sigmoid(probs)
         bernoulli = torch.distributions.Bernoulli(probs)
         nll = - bernoulli.log_prob(x)
         
-        x_rec = torch.empty_like(logits).bernoulli_(probs)
+        x_rec = torch.Tensor(probs.size()).bernoulli_(probs).cuda()
         crit = torch.nn.CrossEntropyLoss(reduction='none')
         ce = crit(x, x_rec)
         
+        # print(f'x {x}')
+        # print(f'x_rec {x_rec}')
+        # print(f'nll {nll}')
         return dict(nll=nll, mse=ce)
 
     def forward(self, px_z):
