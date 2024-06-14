@@ -684,7 +684,7 @@ class Two_stage_vae(HModule):
     def forward(self, x, target):
         # print(f'z {x.shape}')
         activations = self.encoder.forward(x)
-        z, _, kl, distr_params = self.decoder.sample(x, activations)
+        z, _, kl, _ = self.decoder.sample(x, activations)
         out_dict = self.out_net.gaussian_nll(x, z, 'learned')
         
         # print(f'nll {out_dict["nll"].shape}')
@@ -713,9 +713,21 @@ class Two_stage_vae(HModule):
         """
         z = first_stage_vae.forward_get_latents(x)[0]['z']
         activations = self.encoder.forward(z)
-        _, _, kl, distr_params = self.decoder.sample(z, activations)
-        z = [(distr_params['qm'], distr_params['qv'])]
+        z_rec, _, kl, distr_params = self.decoder.sample(z, activations)
+        out_dict = self.out_net.gaussian_nll(z, z_rec, 'learned')
         
-        stats, _ = first_stage_vae.forward(x, x, z)
+        nll_axis = list(range(1, len(out_dict['nll'].size())))
+        nll = out_dict['nll'].sum(dim=nll_axis)
+        kl_axis = list(range(1, len(kl.size())))
+        kl = kl.sum(dim=kl_axis)
+        
+        second_stage_elbo = -nll - kl
+        
+        latents = [(distr_params['qm'], distr_params['qv'])]
+        
+        stats, _ = first_stage_vae.forward(x, x, latents)
         first_stage_elbo = -stats['nelbo']
-        return first_stage_elbo - kl
+        
+        total_elbo = first_stage_elbo + second_stage_elbo
+        
+        return total_elbo
