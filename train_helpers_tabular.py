@@ -149,7 +149,7 @@ def restore_params(model, path, local_rank, mpi_size, map_ddp=True, map_cpu=Fals
 def restore_log(path, local_rank, mpi_size):
     loaded = [json.loads(l) for l in open(distributed_maybe_download(path, local_rank, mpi_size))]
     try:
-        cur_eval_loss = min([z['elbo'] for z in loaded if 'type' in z and z['type'] == 'eval_loss'])
+        cur_eval_loss = min([z['nelbo'] for z in loaded if 'type' in z and z['type'] == 'eval_loss'])
     except ValueError:
         cur_eval_loss = float('inf')
     starting_epoch = max([z['epoch'] for z in loaded if 'type' in z and z['type'] == 'train_loss'])
@@ -190,7 +190,7 @@ def load_vaes(H, logprint):
 def load_opt(H, vae, logprint):
     # optimizer = AdamW(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2))
     optimizer = Adamax(vae.parameters(), weight_decay=H.wd, lr=H.lr, betas=(H.adam_beta1, H.adam_beta2), foreach=False)
-    # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=linear_warmup(H.warmup_iters))
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=H.iters, eta_min=H.lr_min)
     scheduler = NarrowCosineDecay(optimizer, decay_steps=H.decay_iters, decay_start=H.decay_start, minimum_learning_rate=H.min_lr, last_epoch=H.last_epoch, warmup_steps=H.warmup_iters)
     if H.restore_optimizer_path:

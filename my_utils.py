@@ -36,8 +36,8 @@ def test_integrate(attrs, min = 0, max = 1, alias2table=None):
                 
     return integration_domain
 
-def make_points(table_stats, predicates, bias, noise_type=None, alias2table=None):
-    attrs, right_bounds, left_bounds = table_stats
+def make_points(table_stats, predicates, bias, noise_type=None, normalize=None):
+    attrs, name_to_index, right_bounds, left_bounds = table_stats
     
     import copy
     maxs = copy.deepcopy(right_bounds)
@@ -46,33 +46,33 @@ def make_points(table_stats, predicates, bias, noise_type=None, alias2table=None
     for predicate in predicates:
         if len(predicate) == 3:
             
-            column = predicate[0] # 适用于imdb的
+            column = predicate[0].name # 适用于imdb的
             operator = predicate[1]
             val = float(predicate[2])
             
             if noise_type == 'uniform':
                 if operator == '=':
                     left_bounds[column] = val
-                    right_bounds[column] = val + 2 * bias[column]
+                    right_bounds[column] = val + 2 * bias[name_to_index[column]]
                 
                 elif operator == '<=':
                     left_bounds[column] = mins[column] 
-                    right_bounds[column] = val + 2 * bias[column] 
+                    right_bounds[column] = val + 2 * bias[name_to_index[column]] 
                     
                 elif operator  == ">=":
                     left_bounds[column] = val 
                     right_bounds[column] = maxs[column] 
             else:
                 if operator == '=':
-                    left_bounds[column] = val - bias[column] 
-                    right_bounds[column] = val + bias[column] 
+                    left_bounds[column] = val - bias[name_to_index[column]] 
+                    right_bounds[column] = val + bias[name_to_index[column]] 
                     
                 elif operator == '<=':
                     left_bounds[column] = mins[column] 
-                    right_bounds[column] = val + bias[column] 
+                    right_bounds[column] = val + bias[name_to_index[column]] 
                     
                 elif operator  == ">=":
-                    left_bounds[column] = val - bias[column] 
+                    left_bounds[column] = val - bias[name_to_index[column]] 
                     right_bounds[column] = maxs[column]
     
     # print(f'left_bounds {left_bounds} right_bounds {right_bounds}')
@@ -80,44 +80,18 @@ def make_points(table_stats, predicates, bias, noise_type=None, alias2table=None
     integration_domain = []
     
     for attr in attrs:
+        attr = attr.name
         assert left_bounds[attr] < right_bounds[attr], f'predicates {predicates} attr {attr} left_bounds {left_bounds[attr]} right_bounds {right_bounds[attr]}'
-        integration_domain.append([(left_bounds[attr] - mins[attr]) / (maxs[attr] - mins[attr]), (right_bounds[attr] - mins[attr]) / (maxs[attr] - mins[attr])])
-                
-    return integration_domain
-
-def make_point_raw(attrs, predicates, statistics, bias, alias2table=None):
-    left_bounds = {}
-    right_bounds = {}
-    
-    for attr in attrs:
-        col_name = attr
-        if(len(attr.split('.')) == 2):
-            if alias2table is None:
-                col_name = alias2table[attr.split('.')[0]] + f".{attr.split('.')[1]}"
-                
-        left_bounds[col_name] = statistics[col_name]['min']
-        right_bounds[col_name] = statistics[col_name]['max']
-    
-    for predicate in predicates:
-        if len(predicate) == 3:
+        if normalize == 'minmax':
+            integration_domain.append([(left_bounds[attr] - mins[attr]) / (maxs[attr] - mins[attr]), (right_bounds[attr] - mins[attr]) / (maxs[attr] - mins[attr])])
             
-            column = predicate[0] 
-            operator = predicate[1]
-            val = float(predicate[2])
-                
-            if operator == '=':
-                left_bounds[column] = val - bias[column] 
-                right_bounds[column] = val + bias[column] 
-                
-            elif operator == '<=':
-                right_bounds[column] = val
-                
-            elif operator  == ">=":
-                left_bounds[column] = val
-                
-    integration_domain = []
-    for attr in attrs:
-        integration_domain.append([left_bounds[attr], right_bounds[attr]])
+        elif normalize  == 'normalize':
+            loc = 0.5 * (maxs[attr] + mins[attr])
+            integration_domain.append([(left_bounds[attr] - loc) / (0.5 * maxs[attr] - 0.5 * mins[attr]), (right_bounds[attr] - loc) / (0.5 * maxs[attr] - 0.5 * mins[attr])])
+            
+        # elif normalize == 'integer':
+        #     scale = 0.5 / shift
+        #     out = out * scale
                 
     return integration_domain
 
@@ -126,8 +100,9 @@ def estimate_probabilities(model, integration_domain, dim, isdiscrete = False):
     integration_domain = torch.Tensor(integration_domain).cuda()
     
     if isdiscrete:
-        x = integration_domain.reshape(-1, 1, integration_domain.shape[1])
-        prob = torch.exp(model.elbo(x)).sum()
+        pass
+        # x = integration_domain.reshape(-1, 1, integration_domain.shape[1])
+        # prob = torch.exp(model.elbo(x)).sum()
     
     else:
         set_up_backend("torch", data_type="float32")
@@ -145,7 +120,7 @@ def estimate_probabilities(model, integration_domain, dim, isdiscrete = False):
         prob = integrater.integrate(
             multivariate_normal,
             dim=dim,
-            N=10000,
+            N=50000,
             integration_domain=integration_domain,
             backend="torch",
             )   
@@ -266,7 +241,7 @@ def Card(table, columns, operators, vals):
 
     bools = None
     for c, o, v in zip(columns, operators, vals):
-        inds = OPS[o](table[c], v)
+        inds = OPS[o](table[c.name], v)
 
         if bools is None:
             bools = inds
@@ -276,33 +251,33 @@ def Card(table, columns, operators, vals):
     return c
 
 
-def FillInUnqueriedColumns(name_to_index, columns, operators, vals):
-    ncols = len(name_to_index)
-    cs = name_to_index.values
+def FillInUnqueriedColumns(table, columns, operators, vals):
+    ncols = len(table.columns)
+    cs = table.columns
     os, vs = [None] * ncols, [None] * ncols
 
     for c, o, v in zip(columns, operators, vals):
-        idx = name_to_index[c]
+        idx = table.ColumnIndex(c.name)
         os[idx] = o
         vs[idx] = v
 
     return cs, os, vs
 
 
-def Query(name_to_index, columns_info, columns, operators, vals, n_samples):
-        columns, operators, vals = FillInUnqueriedColumns(name_to_index, columns, operators, vals)
+def Query(table, columns, operators, vals, n_samples):
+        columns, operators, vals = FillInUnqueriedColumns(table, columns, operators, vals)
 
         all_samples = []
-        for column_info, op, val in zip(columns_info, operators, vals):
+        for column, op, val in zip(columns, operators, vals):
             if op is not None:
-                valid = OPS[op](column_info['all_distinct_values'], val)
+                valid = OPS[op](column['all_distinct_values'], val)
             else:
-                valid = [True] * len(column_info['all_distinct_values'])
+                valid = [True] * len(column['all_distinct_values'])
             
             selected_idx = [i for i, selected in enumerate(valid) if selected]
             samples = np.random.choice(selected_idx, n_samples)
             # print([column_info['all_distinct_values'][sample] for sample in samples][0:10])
-            all_samples.append([column_info['all_distinct_values'][sample] for sample in samples])
+            all_samples.append([column['all_distinct_values'][sample] for sample in samples])
         all_samples = np.asarray(all_samples).T
 
         return all_samples

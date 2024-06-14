@@ -14,9 +14,10 @@ class Hyperparams(dict):
 
 
 power = Hyperparams()
+power.num_mixtures = 7
 power.width = 7
 power.min_lr = 1e-6
-power.zdim = 14
+power.zdim = 16
 power.wd = 0.
 # power.dec_blocks = "1x1,4m1,4x1,7m4,7x1" # x corresponds to residual block, m corresponds to unpool layer
 # power.enc_blocks = "7x1,7d2,4x1,4d4,1x1" # x corresponds to residual block, d corresponds to pool layer
@@ -29,7 +30,7 @@ power.num_epochs = 20
 power.desc = 'power_test'
 power.skip_threshold = -1.
 power.grad_clip = 30000
-power.decay_iters = 36000
+power.decay_iters = 18000
 power.decay_start = 32
 power.noise_value = '0.0005, 0.0005, 0.005, 0.05, 0.5, 0.5, 0.5'
 power.encoding_modes = 'binary,binary,binary,binary,binary,binary,binary'
@@ -120,6 +121,7 @@ def add_vae_arguments(parser):
     parser.add_argument('--tuning_recover', action="store_true")
     parser.add_argument('--discrete', action="store_true")
     parser.add_argument('--encoding_modes', type=str, default='')
-    parser.add_argument('--vae_type', type=str, default='')
+    parser.add_argument('--vae_type', type=str, default='vanilla_vae')
+    parser.add_argument('--first_stage_percent', type=float, default='0.5')
     
     return parser

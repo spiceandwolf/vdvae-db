@@ -2,7 +2,7 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
-from vae_helpers import HModule, draw_gaussian_diag_samples, gaussian_analytical_kl
+from vae_helpers import HModule, const_max, draw_gaussian_diag_samples, gaussian_analytical_kl, log_prob_from_logits
 from collections import defaultdict
 import numpy as np
 import itertools
@@ -75,7 +75,7 @@ class UnpoolLayer(nn.Module):
 class Conv1DLayer(nn.Conv1d):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, zero_bias=True, zero_weights=False, groups=1, *args, **kwargs):
         super(Conv1DLayer, self).__init__(in_channels, out_channels, kernel_size, stride, padding, groups=groups, *args, **kwargs)
-        # nn.init.xavier_uniform_(self.weight)
+        nn.init.xavier_uniform_(self.weight)
         if zero_bias:
             self.bias.data *= 0.0
         if zero_weights:
@@ -173,6 +173,7 @@ class bottom_up(HModule):
     def forward(self, x):
     
         x = self.in_conv(x)
+        
         activations = {}
         activations[x.shape[2]] = x
         
@@ -206,6 +207,7 @@ class DecBlock(nn.Module):
         
         self.enc = Block(width * 2, cond_width, H.zdim * 2, residual=False, use_3x1=use_3x1) # parameterises mean and variance
         self.prior = Block(width, cond_width, H.zdim * 2 + width, residual=False, use_3x1=use_3x1, zero_last=True) # parameterises mean, variance and xh
+        self.combine = Block(width + H.zdim, cond_width, width, residual=False, use_3x1=use_3x1, zero_last=True)
         
         self.z_proj = get_1x1(H.zdim, width)
         self.z_proj.weight.data *= np.sqrt(1 / n_blocks)
@@ -229,30 +231,34 @@ class DecBlock(nn.Module):
         
         # qv = softclip(qv)
         # pv = softclip(pv)
-        z = draw_gaussian_diag_samples(qm, qv)
-        kl = gaussian_analytical_kl(qm, pm, qv, pv) if self.H.vae_type == 'hvae' else gaussian_analytical_kl(qm, torch.zeros_like(pm), qv, torch.ones_like(pv))
+        # z = draw_gaussian_diag_samples(qm, qv)
+        # kl = gaussian_analytical_kl(qm, pm, qv, pv) if self.H.vae_type == 'hvae' else gaussian_analytical_kl(qm, torch.zeros_like(pm), qv, torch.zeros_like(pv))
        
-        # qv = self.softplus(qv)
-        # pv = self.softplus(pv)
-        # z = draw_gaussian_diag_samples_std(qm, qv)
-        # kl = gaussian_analytical_kl_std(qm, pm, qv, pv)
+        qv = self.softplus(qv)
+        pv = self.softplus(pv)
+        z = draw_gaussian_diag_samples_std(qm, qv)
+        kl = gaussian_analytical_kl_std(qm, pm, qv, pv) if self.H.vae_type == 'hvae' else gaussian_analytical_kl_std(qm, torch.zeros_like(pm), qv, torch.ones_like(pv))
         # self.distribution = D.Normal(qm, qv)
-        distr_params = dict(qm=qm, qv=qv, pm=pm, pv=pv)
+        distr_params = dict(qm=qm, qv=qv, pm=pm, pv=pv) if self.H.vae_type == 'hvae' else dict(qm=qm, qv=qv, pm=torch.zeros_like(pm), pv=torch.ones_like(pv))
         
         return z, x, kl, distr_params
 
     def sample_uncond(self, x, t=None, lvs=None):
-        n, c, h, w = x.shape
         feats = self.prior(x)
         pm, pv, xpp = feats[:, :self.zdim, ...], feats[:, self.zdim:self.zdim * 2, ...], feats[:, self.zdim * 2:, ...]
         x = x + xpp
         if lvs is not None:
-            z = lvs
+            z = draw_gaussian_diag_samples_std(lvs[0], lvs[1])
+            kl = gaussian_analytical_kl_std(lvs[0], pm, lvs[1], pv) if self.H.vae_type == 'hvae' else gaussian_analytical_kl_std(lvs[0], torch.zeros_like(pm), lvs[1], torch.ones_like(pv))
+            distr_params = dict(qm=lvs[0], qv=lvs[1], pm=pm, pv=pv) if self.H.vae_type == 'hvae' else dict(qm=lvs[0], qv=lvs[1], pm=torch.zeros_like(pm), pv=torch.ones_like(pv))
         else:
             if t is not None:
                 pv = pv + torch.ones_like(pv) * np.log(t)
             z = draw_gaussian_diag_samples(pm, pv)
-        return z, x
+            kl = 0
+            distr_params = dict(qm=pm, qv=pv, pm=pm, pv=pv) if self.H.vae_type == 'hvae' else dict(qm=torch.zeros_like(pm), qv=torch.ones_like(pv), pm=torch.zeros_like(pm), pv=torch.ones_like(pv))
+        
+        return z, x, kl, distr_params
 
     def get_inputs(self, xs, activations):
         acts = activations[self.base]
@@ -275,7 +281,8 @@ class DecBlock(nn.Module):
             x = x + self.unpool(xs[self.mixin][:, :x.shape[1], ...])
             # print(f'x unpool {x.shape}')
         z, x, kl, distr_params = self.sample(x, acts)
-        x = x + self.z_fn(z)
+        # x = x + self.z_fn(z)
+        x = self.combine(torch.cat([x, z], dim=1))
         x = self.resnet(x)
         xs[self.base] = x 
         
@@ -288,14 +295,14 @@ class DecBlock(nn.Module):
             x = xs[self.base]
         except KeyError:
             ref = xs[list(xs.keys())[0]]
-            x = torch.zeros(dtype=ref.dtype, size=(ref.shape[0], self.widths[self.base], self.base, self.base), device=ref.device)
+            x = torch.zeros(dtype=ref.dtype, size=(ref.shape[0], self.widths[self.base], self.base), device=ref.device)
         if self.mixin is not None:
-            x = x + F.interpolate(xs[self.mixin][:, :x.shape[1], ...], scale_factor=self.base // self.mixin)
-        z, x = self.sample_uncond(x, t, lvs=lvs)
+            x = x + self.unpool(xs[self.mixin][:, :x.shape[1], ...])
+        z, x, kl, distr_params = self.sample_uncond(x, t, lvs=lvs)
         x = x + self.z_fn(z)
         x = self.resnet(x)
         xs[self.base] = x
-        return xs
+        return xs, dict(kl=kl, **distr_params)
 
 
 class top_down(HModule):
@@ -318,9 +325,9 @@ class top_down(HModule):
         
         self.out_net = OutPutNet(H)
         
-        # self.gain = nn.Parameter(torch.ones(1, H.width, 1))
-        # self.bias = nn.Parameter(torch.zeros(1, H.width, 1))
-        # self.final_fn = lambda x: x * self.gain + self.bias 
+        self.gain = nn.Parameter(torch.ones(1, H.width, 1))
+        self.bias = nn.Parameter(torch.zeros(1, H.width, 1))
+        self.final_fn = lambda x: x * self.gain + self.bias 
 
     def forward(self, activations, get_latents=False):
         stats = []
@@ -330,7 +337,7 @@ class top_down(HModule):
             xs, block_stats = block(xs, activations, get_latents=get_latents)
             stats.append(block_stats)
         # print(f'xs : {xs[self.H.image_size]}')
-        # xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
+        xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
         # print(f'xs_final : {xs[self.H.image_size]}')
         return xs[self.H.image_size], stats
 
@@ -349,12 +356,14 @@ class top_down(HModule):
 
     def forward_manual_latents(self, n, latents, t=None):
         xs = {}
+        stats = []
         for bias in self.bias_xs:
-            xs[bias.shape[1]] = bias.repeat(n, 1, 1, 1)
+            xs[bias.shape[1]] = bias.repeat(n, 1, 1)
         for block, lvs in itertools.zip_longest(self.dec_blocks, latents):
-            xs = block.forward_uncond(xs, t, lvs=lvs)
+            xs, stats = block.forward_uncond(xs, t, lvs=lvs)
+            stats.append(stats)
         xs[self.H.image_size] = self.final_fn(xs[self.H.image_size])
-        return xs[self.H.image_size]
+        return xs[self.H.image_size], stats
 
 
 class VAE(HModule):
@@ -362,10 +371,13 @@ class VAE(HModule):
         self.encoder = bottom_up(self.H)
         self.decoder = top_down(self.H)
 
-    def forward(self, x, x_target):
+    def forward(self, x, x_target, latents = None):
         # x : [batch_size, channels, length] or [batch_size, channels, height, width]
-        activations = self.encoder.forward(x)
-        px_z, stats = self.decoder.forward(activations)
+        if latents:
+            px_z, stats = self.decoder.forward_manual_latents(1, latents)
+        else:
+            activations = self.encoder.forward(x)
+            px_z, stats = self.decoder.forward(activations)
         
         if self.H.discrete == True:
             out_dict = self.decoder.out_net.bernoulli_nll(x, px_z)
@@ -376,6 +388,8 @@ class VAE(HModule):
                 out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
             elif self.H.out_net_mode == 'discretized_gaussian':
                 out_dict = self.decoder.out_net.discretized_gaussian_nll(x, px_z)
+            elif self.H.out_net_mode == 'discretized_mix_logistic':
+                out_dict = self.decoder.out_net.discretized_mix_logistic_loss(x, px_z)
             else:
                 raise NotImplementedError
         
@@ -386,13 +400,13 @@ class VAE(HModule):
         kl_dist = torch.zeros_like(nll) 
         
         for statdict in stats:
-            # print(statdict['kl'].shape)
+            # print(statdict['kl'].sum(dim=(1,2)).shape)
             kl_dist += statdict['kl'].sum(dim=(1,2))
         
         # nelbo = (ll + kl_dist).mean()
         nelbo = (nll + kl_dist)
         
-        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl_dist.mean(), mse=mse.mean()), stats[-1]['qv'].mean(dim=(0,2))
+        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl_dist.mean(), mse=mse.mean()), out_dict['sigma']
 
     def forward_get_latents(self, x):
         activations = self.encoder.forward(x)
@@ -409,11 +423,9 @@ class VAE(HModule):
     
     def forward_samples(self, n_batch, x):
         activations = self.encoder.forward(x)
-        pred_x, stats = self.decoder.forward(activations)
-        posterior_mu = stats[-1]['qm']
-        posterior_logstd = stats[-1]['qv']
+        px_z, stats = self.decoder.forward(activations)
         
-        return self.decoder.out_net.sample(x, posterior_mu, posterior_logstd, pred_x)
+        return self.decoder.out_net.sample(x, px_z)
     
     def elbo(self, x):
         # print(f'x {x[0]} {x.shape}')
@@ -425,16 +437,19 @@ class VAE(HModule):
             out_dict = self.decoder.out_net.bernoulli_nll(x, px_z)
         else:
             if self.H.out_net_mode == 'gaussian':
-                out_dict = self.decoder.out_net.gaussian_nll(x, px_z, self.H.std_mode)
+                out_dict = self.decoder.out_net.gaussian_nll_optimal_sigma(x, px_z)
             elif self.H.out_net_mode == 'mse':
                 out_dict = self.decoder.out_net.mse_nll(x, px_z, self.H.mse_mode)
             elif self.H.out_net_mode == 'discretized_gaussian':
                 out_dict = self.decoder.out_net.discretized_gaussian_nll(x, px_z)
+            elif self.H.out_net_mode == 'discretized_mix_logistic':
+                out_dict = self.decoder.out_net.discretized_mix_logistic_loss(x, px_z)    
             else:
                 raise NotImplementedError
         
         # print(f'mse : {out_dict['mse']}')
-        nll = out_dict['nll'].sum(dim=(1,2))
+        nll_axis = list(range(1, len(out_dict['nll'].size())))
+        nll = out_dict['nll'].sum(dim=nll_axis)
         
         kl_dist = torch.zeros_like(nll) 
         
@@ -476,26 +491,40 @@ class OutPutNet(nn.Module):
         self.H = H
         self.width = H.width
         self.softplus = nn.Softplus(beta=H.gradient_smoothing_beta) # ln(2) ~= 0.6931472.
-        self.out_conv = Conv1DLayer(H.width, H.image_channels * 2 if H.discrete != True else 1, kernel_size=1, stride=1, padding=0) # loc and scale
+        self.out_conv = Conv1DLayer(H.width, H.image_channels * 2 if H.out_net_mode != 'discretized_mix_logistic' else H.num_mixtures * 3, kernel_size=1, stride=1, padding=0) # loc and scale
+        self.out_conv2 = Conv1DLayer(H.width, H.image_channels, kernel_size=1, stride=1, padding=0) 
+        self.sigma = nn.Parameter(torch.ones(1, 1, H.width), requires_grad=False if H.std_mode == 'optimal_sigma' else True)
 
     def gaussian_nll(self, x, px_z, std_mode):
-        mu, logstd = self.forward(px_z).chunk(2, dim=1)
+        mu, std = self.forward(px_z).chunk(2, dim=1)
         if std_mode == 'learned':
             # logstd = softclip(logstd)
-            mse = 0.5 * torch.pow((x - mu) / logstd.exp(), 2)
-            nll = mse + logstd + 0.5 * np.log(2 * np.pi)
-            return dict(nll=nll, mse=mse) 
+            std = self.softplus(std)
+            mse = 0.5 * torch.pow((x - mu) / std, 2)
+            nll = mse + torch.log(std) + 0.5 * np.log(2 * np.pi)
+            return dict(nll=nll, mse=mse, sigma=std) 
         
-        elif std_mode == 'batch':
-            logstd = ((x - mu) ** 2).mean([0], keepdim=True).sqrt().log() 
-            logstd = softclip(logstd)
+        elif std_mode == 'optimal_sigma':
+            mu = self.out_conv2(px_z)
+            std = ((x - mu) ** 2).mean([0,1], keepdim=True)
+            # std = self.softplus(std)
+            self.sigma = nn.Parameter(0.5 * (self.sigma + std), requires_grad=False)
+            # std = std.sqrt()
 
-            mse = 0.5 * torch.pow((x - mu) / logstd.exp(), 2)
-            nll = mse + logstd + 0.5 * np.log(2 * np.pi)
-            return dict(nll=nll, mse=mse) 
+            mse = torch.pow((x - mu), 2)
+            nll = 0.5 * mse / std + torch.log(std) + 0.5 * np.log(2 * np.pi)
+            return dict(nll=nll, mse=mse, sigma=std) 
         
         else:
             raise NotImplementedError
+        
+    def gaussian_nll_optimal_sigma(self, x, px_z):
+        mu = self.out_conv2(px_z)
+        std = self.sigma.sqrt()
+        mse = 0.5 * torch.pow((x - mu) / std, 2)
+        nll = mse + torch.log(std) + 0.5 * np.log(2 * np.pi)
+        return dict(nll=nll, mse=mse) 
+        
 
     def mse_nll(self, x, px_z, mse_mode):
         
@@ -528,40 +557,88 @@ class OutPutNet(nn.Module):
         else:
             raise NotImplementedError
         
-    def discretized_gaussian_log_likelihood(self, x, loc, log_scale):
-        assert x.shape == loc.shape == log_scale.shape
-        
-        centered_x = x - loc
-        inv_stdv = torch.exp(-log_scale)
-        
-        plus_in = inv_stdv * (centered_x + self.H.shift * 2)
-        cdf_plus = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(plus_in)
-        min_in = inv_stdv * (centered_x)
-        cdf_min = torch.distributions.Normal(torch.zeros_like(loc), torch.ones_like(log_scale)).cdf(min_in)
-        cdf_delta = cdf_plus - cdf_min
-
-        log_probs = torch.log(softclip(cdf_delta, min=1e-7))
-
-        return log_probs
-    
     def discretized_gaussian_nll(self, x, px_z):
         mu, logstd = self.forward(px_z).chunk(2, dim=1)
         crit = torch.nn.MSELoss(reduction='none')
         pred_x = draw_gaussian_diag_samples(mu, logstd)
         mse = crit(pred_x, x) / (self.H.shift * 2) ** 2
         
-        nll = -self.discretized_gaussian_log_likelihood(x, mu, logstd)
+        centered_x = x - mu
+        inv_stdv = torch.exp(-logstd)
+        
+        plus_in = inv_stdv * (centered_x + self.H.shift * 2)
+        cdf_plus = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(logstd)).cdf(plus_in)
+        min_in = inv_stdv * (centered_x)
+        cdf_min = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(logstd)).cdf(min_in)
+        cdf_delta = cdf_plus - cdf_min
+
+        nll = - torch.log(softclip(cdf_delta, min=1e-7))
+        
         return dict(nll=nll, mse=mse)
     
+    def discretized_mix_logistic_loss(self, x, px_z):
+        l = self.forward(px_z)
+        x = x.permute(0, 2, 1)
+        l = l.permute(0, 2, 1)
+        """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
+        # Adapted from https://github.com/openai/pixel-cnn/blob/master/pixel_cnn_pp/nn.py
+        xs = [s for s in x.shape]  # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
+        ls = [s for s in l.shape]  # predicted distribution, e.g. (B,32,32,100)
+        nr_mix = int(ls[-1] / 3)  # here and below: unpacking the params of the mixture of logistics
+        logit_probs = l[:, :, :nr_mix]
+        l = torch.reshape(l[:, :, nr_mix:], xs + [nr_mix * 2])
+        means = l[:, :, :, :nr_mix]
+        log_scales = softclip(l[:, :, :, nr_mix:2 * nr_mix], -8.)
+        
+        x = torch.reshape(x, xs + [1]) + torch.zeros(xs + [nr_mix]).to(x.device)  # here and below: getting the means and adjusting them based on preceding sub-pixels
+        
+        means = torch.cat([torch.reshape(means[:, :, 0, :], [xs[0], xs[1], 1, nr_mix])], dim=2)
+        
+        centered_x = x - means
+        inv_stdv = torch.exp(-log_scales)
+        
+        plus_in = inv_stdv * (centered_x + self.H.distortions * 0.5)
+        cdf_plus = torch.sigmoid(plus_in)
+        min_in = inv_stdv * (centered_x - self.H.distortions * 0.5)
+        
+        cdf_min = torch.sigmoid(min_in)
+        log_cdf_plus = plus_in - F.softplus(plus_in)  # log probability for edge case of 0 (before scaling)
+        log_one_minus_cdf_min = -F.softplus(min_in)  # log probability for edge case of 255 (before scaling)
+        cdf_delta = cdf_plus - cdf_min  # probability for all other cases
+        mid_in = inv_stdv * centered_x
+        log_pdf_mid = mid_in - log_scales - 2. * F.softplus(mid_in)  # log probability in the center of the bin, to be used in extreme cases (not actually used in our code)
+
+        # now select the right output: left edge case, right edge case, normal case, extremely low prob case (doesn't actually happen for us)
+
+        # this is what we are really doing, but using the robust version below for extreme cases in other applications and to avoid NaN issue with tf.select()
+        # log_probs = tf.select(x < -0.999, log_cdf_plus, tf.select(x > 0.999, log_one_minus_cdf_min, tf.log(cdf_delta)))
+
+        # robust version, that still works if probabilities are below 1e-5 (which never happens in our code)
+        # tensorflow backpropagates through tf.select() by multiplying with zero instead of selecting: this requires use to use some ugly tricks to avoid potential NaNs
+        # the 1e-12 in tf.maximum(cdf_delta, 1e-12) is never actually used as output, it's purely there to get around the tf.select() gradient issue
+        # if the probability on a sub-pixel is below 1e-5, we use an approximation based on the assumption that the log-density is constant in the bin of the observed sub-pixel value
+        
+        log_probs = torch.where(x < -0.999,
+                                log_cdf_plus,
+                                torch.where(x > 0.999,
+                                            log_one_minus_cdf_min,
+                                            torch.where(cdf_delta > 1e-10,
+                                                        torch.log(const_max(cdf_delta, 1e-16)),
+                                                        log_pdf_mid - torch.log(self.H.distortions * 0.5))))
+        
+        log_probs = log_probs.sum(dim=2) + log_prob_from_logits(logit_probs)
+        mixture_probs = torch.logsumexp(log_probs, -1)
+        nll = -1. * mixture_probs
+        return dict(nll=nll, mse=nll, sigma=l)
+    
     def bernoulli_nll(self, x, px_z):
-        probs = self.forward(px_z)
+        probs, _ = self.forward(px_z).chunk(2, dim=1)
         probs = torch.sigmoid(probs)
-        bernoulli = torch.distributions.Bernoulli(probs)
+        bernoulli = torch.distributions.Bernoulli(probs=probs)
         nll = - bernoulli.log_prob(x)
         
-        x_rec = torch.Tensor(probs.size()).bernoulli_(probs).cuda()
-        crit = torch.nn.CrossEntropyLoss(reduction='none')
-        ce = crit(x, x_rec)
+        # x_rec = torch.Tensor(probs.size()).bernoulli_(probs).cuda()
+        ce = - nll
         
         # print(f'x {x}')
         # print(f'x_rec {x_rec}')
@@ -572,19 +649,73 @@ class OutPutNet(nn.Module):
         xhat = self.out_conv(px_z)
         return xhat
     
-    def sample(self, x, loc, logscale, pred_x):
+    def sample(self, x, px_z):
         with torch.no_grad():
-            mu, logstd = self.out_mu_logstd(torch.cat([loc, logscale], dim=1)).chunk(2, dim=1)
-            pred_x = self.out_recon(pred_x)
+            mu, logstd = self.forward(px_z).chunk(2, dim=1)
+            if self.H.discrete == True:
+                probs = torch.sigmoid(mu)
+                x_rec = torch.Tensor(probs.size()).bernoulli_(probs).cuda()
+            else:
+                if self.H.out_net_mode == 'gaussian':
+                    out_dict = self.decoder.out_net.gaussian_nll(x, px_z, self.H.std_mode)
             
-            print(f' mu: {mu} std {torch.exp(logstd)}')
+                print(f' mu: {mu} std {torch.exp(logstd)}')
             
-            eps = torch.empty_like(mu).normal_(0., 1.)
-            sample_pred_x = torch.exp(logstd) * eps + mu
+                eps = torch.empty_like(mu).normal_(0., 1.)
+                sample_pred_x = torch.exp(logstd) * eps + mu
             
-        return dict(pred_x=pred_x, sample_pred_x=sample_pred_x)
+        return x_rec, probs
     
     def calibrated_sample(self, posterior_mu):
         mu = self.out_conv(posterior_mu) 
         eps = torch.empty_like(mu).normal_(0., 1.)
-        return torch.exp(self.log_sigma) * eps + mu
+        return torch.exp(self.log_sigma) * eps + mu()
+    
+    
+class Two_stage_vae(HModule):
+    
+    def build(self):
+        H = self.H
+        self.in_conv = get_3x1(H.image_channels, H.width)
+        self.encoder = Block(H.width, int(H.width * H.bottleneck_multiple), H.width, residual=False, use_3x1=H.width > 2)
+        self.decoder = DecBlock(H, H.width, None, 1)
+        self.out_net = OutPutNet(H)
+    
+    def forward(self, x, target):
+        # print(f'z {x.shape}')
+        activations = self.encoder.forward(x)
+        z, _, kl, distr_params = self.decoder.sample(x, activations)
+        out_dict = self.out_net.gaussian_nll(x, z, 'learned')
+        
+        # print(f'nll {out_dict["nll"].shape}')
+        # print(f'kl {kl.shape}')
+        
+        nll_axis = list(range(1, len(out_dict['nll'].size())))
+        nll = out_dict['nll'].sum(dim=nll_axis)
+        mse_axis = list(range(1, len(out_dict['mse'].size())))
+        mse = out_dict['mse'].sum(dim=mse_axis)
+        kl_axis = list(range(1, len(kl.size())))
+        kl = kl.sum(dim=kl_axis)
+        
+        nelbo = (nll + kl)
+        
+        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl.mean(), mse=mse.mean()), out_dict['sigma'] 
+    
+    def elbo(self, first_stage_vae, x):
+        """only support to vanilla_vae currently
+
+        Args:
+            first_stage_vae (model): first_stage_vae
+            x (tensor): input data
+
+        Returns:
+            tensor: elbo
+        """
+        z = first_stage_vae.forward_get_latents(x)[0]['z']
+        activations = self.encoder.forward(z)
+        _, _, kl, distr_params = self.decoder.sample(z, activations)
+        z = [(distr_params['qm'], distr_params['qv'])]
+        
+        stats, _ = first_stage_vae.forward(x, x, z)
+        first_stage_elbo = -stats['nelbo']
+        return first_stage_elbo - kl

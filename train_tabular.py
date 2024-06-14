@@ -8,15 +8,17 @@ import ray.train
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 # from torch.utils.data.distributed import DistributedSampler
-from data_tabular import Discretized_data, set_up_data
+from data_tabular import set_up_data
 from utils import get_cpu_stats_over_ranks
-from train_helpers_tabular import set_up_hyperparams, load_vaes, load_opt, accumulate_stats, save_model, update_ema, update_hparams
-from my_utils import Card, ErrorMetric, GenerateQuery, Query, make_point_raw, make_points, estimate_probabilities, test_integrate
+from train_helpers_tabular import set_up_hyperparams, load_vaes, load_opt, accumulate_stats, save_model, update_ema
+from my_utils import Card, ErrorMetric, GenerateQuery, Query, make_points, estimate_probabilities, test_integrate
 from torch.utils.tensorboard import SummaryWriter
 import tempfile
 from ray import train, tune
 from ray.train import Checkpoint
 from ray.tune.schedulers import ASHAScheduler
+
+from vae_tabular import Two_stage_vae
 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL']= '2'
@@ -27,7 +29,7 @@ def training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, ite
     with autograd.set_detect_anomaly(True):
         t0 = time.time()
         vae.zero_grad()
-        stats, bottom_qv = vae.forward(data_input, target)
+        stats, gamma = vae.forward(data_input, target)
         stats['nelbo'].backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), H.grad_clip).item()
         recon_nans = torch.isnan(stats['recon']).sum()
@@ -45,7 +47,7 @@ def training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, ite
 
         t1 = time.time()
         stats.update(skipped_updates=skipped_updates, iter_time=t1 - t0, grad_norm=grad_norm)
-        return stats, bottom_qv
+        return stats, gamma / data_input.shape[0]
 
 
 def eval_step(data_input, target, ema_vae):
@@ -63,13 +65,20 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
     iters_since_starting = 0
     H.ema_rate = torch.as_tensor(H.ema_rate).cuda()
     best_score = torch.inf
-    mse_loss = 0
-    for epoch in range(starting_epoch, H.num_epochs):
+    
+    first_stage_percent = 1
+    if H.vae_type == '2_stage_vae':
+        first_stage_percent = H.first_stage_percent
+        
+    # first stage
+    for epoch in range(starting_epoch, int(first_stage_percent * H.num_epochs)):
         # train_sampler.set_epoch(epoch)
-        for x in DataLoader(data_train, batch_size=H.n_batch, drop_last=True, pin_memory=True, sampler=train_sampler):
+        dec_gamma = []
+        for x in DataLoader(data_train, batch_size=H.n_batch, pin_memory=True, sampler=train_sampler):
             target, data_input = preprocess_fn(x)
             # print(f'target {target[0].dtype} data_input {data_input[0].dtype}')
-            training_stats, bottom_qv = training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, iterate)
+            training_stats, gamma = training_step(H, data_input, target, vae, ema_vae, optimizer, scheduler, iterate)
+            dec_gamma.append(gamma)
             stats.append(training_stats)
             # scheduler.step() # `optimizer.step()`should be called before `lr_scheduler.step()`.
             if iterate % H.iters_per_print == 0 or iters_since_starting in early_evals:
@@ -108,17 +117,134 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
                 logprint(f'Saving model@epoch-{epoch} to {fp}')
                 save_model(fp, vae, ema_vae, optimizer, H)
         
-        if writer is not None:    
-            writer.add_scalar('train_recon', training_stats['recon'], epoch)
-            writer.add_scalar('train_kl', training_stats['kl_dist'], epoch)
-            writer.add_scalar('train_nelbo', training_stats['nelbo'], epoch)
-            writer.add_scalar('train_mse', training_stats['mse'], epoch)
-            writer.add_histogram('bottom_qv', bottom_qv, epoch)
+        if writer is not None:
+            recon_stats = []
+            kl_stats = []
+            nelbo_stats = []
+            mse_stats = []
+            for epoch_stat in stats:
+                recon_stats.append(epoch_stat['recon']) 
+                kl_stats.append(epoch_stat['kl_dist'])
+                nelbo_stats.append(epoch_stat['nelbo'])
+                mse_stats.append(epoch_stat['mse']) 
+                
+            recon_stats = np.mean(recon_stats)
+            kl_stats = np.mean(kl_stats)
+            nelbo_stats = np.mean(nelbo_stats)
+            mse_stats = np.mean(mse_stats)
+                
+            writer.add_scalar('train_recon', recon_stats, epoch)
+            writer.add_scalar('train_kl', kl_stats, epoch)
+            writer.add_scalar('train_nelbo/bits', nelbo_stats / np.log(2), epoch)
+            writer.add_scalar('train_mse', mse_stats, epoch)
+            
+            dec_gamma = torch.cat(dec_gamma, dim=0)
+            for i in range(dec_gamma.shape[-1]):
+                writer.add_histogram(f'gamma_dim_{i}', dec_gamma[:, :, i:i+1], epoch)
+            # print(f'qv {gamma}')
         
             # for i, kl in enumerate(kl_list):
             #     writer.add_scalar(f'train_layer_{i}_kl', kl, epoch)
             
         # break
+    
+    fp = os.path.join(H.save_dir, f'epoch-{epoch}')
+    save_model(fp, vae, ema_vae, optimizer, H)
+    logprint(f'Saving model@epoch-{epoch} to {fp}')
+    
+    # estimate_marginal_kl(H, vae, data_train, preprocess_fn, logprint)
+    
+    # second stage
+    if first_stage_percent != 1:
+        logprint(f'The second stage training starts ...')
+        second_stage_stats = []
+        vanilla_vae = Two_stage_vae(H).cuda(H.local_rank)
+        ema_vanilla_vae = Two_stage_vae(H).cuda(H.local_rank)
+        ema_vanilla_vae.requires_grad_(False)
+        optimizer, scheduler, _, _, _ = load_opt(H, vanilla_vae, logprint)
+        
+        z_train = []
+        for x in DataLoader(data_train, batch_size=H.n_batch, pin_memory=True, sampler=train_sampler):
+            target, data_input = preprocess_fn(x)
+            with torch.no_grad():
+                first_stage_stats = vae.forward_get_latents(data_input)
+            z_train.append(first_stage_stats[0]['z'].cpu())
+        z_train = torch.cat(z_train, dim=0) 
+        
+        z_valid = []
+        valid_sampler = RandomSampler(data_valid)
+        for x in DataLoader(data_valid, batch_size=H.n_batch, pin_memory=True, sampler=valid_sampler):
+            target, data_input = preprocess_fn(x)
+            with torch.no_grad():
+                first_stage_stats = vae.forward_get_latents(data_input)
+            z_valid.append(first_stage_stats[0]['z'].cpu())
+        z_valid = torch.cat(z_valid, dim=0) 
+          
+        train_sampler = RandomSampler(z_train)  
+        
+        for epoch in range(int(first_stage_percent * H.num_epochs), H.num_epochs):
+            dec_gamma = []
+            for x in DataLoader(z_train, batch_size=H.n_batch, pin_memory=True, sampler=train_sampler):
+                target, data_input = x.cuda(non_blocking=True), x.cuda(non_blocking=True)
+                training_stats, gamma = training_step(H, data_input, target, vanilla_vae, ema_vanilla_vae, optimizer, scheduler, iterate)
+                dec_gamma.append(gamma)
+                second_stage_stats.append(training_stats)
+                if iterate % H.iters_per_print == 0:
+                    # logprint(model=H.desc, type='train_loss', lr=scheduler.get_last_lr()[0], epoch=epoch, step=iterate, **accumulate_stats(stats, H.iters_per_print))
+                    logprint(model=H.desc, type='second_stage_train_loss', lr=scheduler.get_last_lr()[0].item(), epoch=epoch, step=iterate, **accumulate_stats(second_stage_stats, H.iters_per_print))
+                iterate += 1
+                iters_since_starting += 1
+                if iterate % H.iters_per_save == 0:
+                    if np.isfinite(second_stage_stats[-1]['nelbo']):
+                        logprint(model=H.desc, type='second_stage_train_loss', epoch=epoch, step=iterate, **accumulate_stats(second_stage_stats, H.iters_per_print))
+                        fp = os.path.join(H.save_dir, 'latest')
+                        logprint(f'Saving model@ {iterate} to {fp}')
+                        save_model(fp, vanilla_vae, ema_vanilla_vae, optimizer, H)
+                            
+            if epoch % H.epochs_per_eval == 0:
+                valid_stats = evaluate(H, ema_vanilla_vae, z_valid, preprocess_fn)
+                logprint(model=H.desc, type='second_stage_eval_loss', epoch=epoch, step=iterate, **valid_stats)
+                
+                if writer is not None:
+                    writer.add_scalar('second_stage_eval_nelbo', valid_stats['filtered_nelbo'], epoch)
+                    
+                fp = os.path.join(H.save_dir, f'epoch-{epoch}')
+                save_model(fp, vanilla_vae, ema_vanilla_vae, optimizer, H)
+                if np.isfinite(valid_stats['filtered_nelbo']) and best_score >= valid_stats['mse']:
+                    best_score = valid_stats['mse']
+                    fp = os.path.join(H.save_dir, f'best')
+                    logprint(f'Saving model@epoch-{epoch} to {fp}')
+                    save_model(fp, vanilla_vae, ema_vanilla_vae, optimizer, H)
+            
+            if writer is not None:
+                recon_stats = []
+                kl_stats = []
+                nelbo_stats = []
+                mse_stats = []
+                for epoch_stat in stats:
+                    recon_stats.append(epoch_stat['recon']) 
+                    kl_stats.append(epoch_stat['kl_dist'])
+                    nelbo_stats.append(epoch_stat['nelbo'])
+                    mse_stats.append(epoch_stat['mse']) 
+                    
+                recon_stats = np.mean(recon_stats)
+                kl_stats = np.mean(kl_stats)
+                nelbo_stats = np.mean(nelbo_stats)
+                mse_stats = np.mean(mse_stats)
+                    
+                writer.add_scalar('train_recon', recon_stats, epoch)
+                writer.add_scalar('train_kl', kl_stats, epoch)
+                writer.add_scalar('train_nelbo/bits', nelbo_stats / np.log(2), epoch)
+                writer.add_scalar('train_mse', mse_stats, epoch)
+                
+                dec_gamma = torch.cat(dec_gamma, dim=0)
+                for i in range(dec_gamma.shape[-1]):
+                    writer.add_histogram(f'gamma_dim_{i}', dec_gamma[:, :, i:i+1], epoch)
+                    
+        vae = vanilla_vae 
+        ema_vae = ema_vanilla_vae 
+        data_valid = z_valid        
+                            
             
     valid_stats = evaluate(H, ema_vae, data_valid, preprocess_fn)
     logprint(model=H.desc, type='eval_loss', epoch=H.num_epochs, step=iterate, **valid_stats)
@@ -149,6 +275,27 @@ def evaluate(H, ema_vae, data_valid, preprocess_fn):
     return stats
 
 
+def estimate_marginal_kl(H, vae, data_train, preprocess_fn, logprint):
+    '''
+    estimating the marginal KL using MC
+    !!! require too much GPU memory to use !!!
+    '''
+    marginal_kl = 0
+    posterior_list = []
+    for x in DataLoader(data_train, batch_size=H.n_batch, pin_memory=True):
+        target, data_input = preprocess_fn(x) 
+        with torch.no_grad():
+            stats = vae.forward_get_latents(data_input)
+        posterior = torch.distributions.Normal(stats[0]['qm'], stats[0]['qv'])
+        sample_list = posterior.sample_n(1000)
+        posterior_list += [posterior.log_prob(sample).cpu() for sample in sample_list]
+    posterior_list = torch.tensor(posterior_list).cuda()
+    print(f'posterior_list {posterior_list.shape}')
+    prior = torch.distributions.Normal(torch.zeros(sample_list), torch.ones(sample_list))
+    marginal_kl = torch.logsumexp(posterior_list, posterior_list.shape) - prior.log_prob(sample_list).sum(sample_list.shape)
+    logprint(f'marginal_kl(qz||pz): {marginal_kl}') 
+    
+
 def select_n_random(data, labels=None, n=100):
     '''
     Selects n random datapoints and their corresponding labels from a dataset
@@ -172,14 +319,10 @@ def run_test_eval(H, ema_vae, data_test, preprocess_fn, logprint):
     logprint(type='test_loss', **stats)
 
 
-def run_query_test_eval(H, model, table_data, pad_value, logprint, discretizer=None):
+def run_query_test_eval(H, model, table_data, preprocess_fn, logprint):
     print('evaluating')
-    n_rows = table_data.shape[0] - int(table_data.shape[0] * 0.1) 
-    name_to_index = {c: i for i, c in enumerate(table_data.columns)}
-    columns_info = [dict([('col', col), 
-                        ('all_distinct_values', np.sort(table_data[col].unique())),]) 
-                            for col in table_data.columns]
-    
+    n_rows = table_data.data.shape[0] - int(table_data.data.shape[0] * 0.1) 
+    print(model.decoder.out_net.sigma)
     qerrors = []
     dim = H.width
     rng = np.random.RandomState(1234)
@@ -190,16 +333,15 @@ def run_query_test_eval(H, model, table_data, pad_value, logprint, discretizer=N
     # Test
     for i in range(3000):
         
-        cols, ops, vals = GenerateQuery(table_data.columns, rng, table_data[int(table_data.shape[0] * 0.1):])
-        true_card = Card(table_data[int(table_data.shape[0] * 0.1):], cols, ops, vals)
+        cols, ops, vals = GenerateQuery(table_data.columns, rng, table_data.data[int(table_data.data.shape[0] * 0.1):])
+        true_card = Card(table_data.data[int(table_data.data.shape[0] * 0.1):], cols, ops, vals)
         predicates = []
         for c, o, v in zip(cols, ops, vals):
             predicates.append((c, o, v))
         
         if H.discrete:
-            samples = Query(name_to_index, columns_info, cols, ops, vals, 2000)
-            discretizer = Discretized_data(table_data, np.array(H.pad_value) * 2, H.encoding_lists)
-            integration_domain = discretizer.encode_data(samples)
+            samples = Query(table_data, cols, ops, vals, 2000)
+            integration_domain = preprocess_fn(samples)
             # print(predicates)
             # print(f'integration_domain[0]: {integration_domain[0]}')
             prob = estimate_probabilities(model, integration_domain, dim, H.discrete).item() / 2000
@@ -207,26 +349,24 @@ def run_query_test_eval(H, model, table_data, pad_value, logprint, discretizer=N
         else:    
             left_bounds = {}
             right_bounds = {}
-            bias = {}
             
             for idx, attr in enumerate(table_data.columns):
-                col_name = attr
+                col_name = attr.name
                         
                 if H.noise_type == 'uniform':
-                    left_bounds[col_name] = table_data[attr].min()
-                    right_bounds[col_name] = table_data[attr].max() + 2 * pad_value[idx]
+                    left_bounds[col_name] = table_data.mins[idx]
+                    right_bounds[col_name] = table_data.maxs[idx] + 2 * table_data.bias[idx]
                 elif H.noise_type == 'gaussian':
-                    left_bounds[col_name] = table_data[attr].min() - pad_value[idx]
-                    right_bounds[col_name] = table_data[attr].max() + pad_value[idx]
+                    left_bounds[col_name] = table_data.mins[idx] - table_data.bias[idx]
+                    right_bounds[col_name] = table_data.maxs[idx] + table_data.bias[idx]
                 else:
-                    left_bounds[col_name] = table_data[attr].min()
-                    right_bounds[col_name] = table_data[attr].max()
-                bias[col_name] = pad_value[idx] 
-            table_stats = (table_data.columns, right_bounds, left_bounds)
+                    left_bounds[col_name] = table_data.mins[idx]
+                    right_bounds[col_name] = table_data.maxs[idx] 
+            table_stats = (table_data.columns, table_data.name_to_index, right_bounds, left_bounds)
             
             # print(predicates)
             # integration_domain = make_point_raw(table_data.columns, predicates, statistics, noise)
-            integration_domain = make_points(table_stats, predicates, bias, H.noise_type)
+            integration_domain = make_points(table_stats, predicates, table_data.bias, H.noise_type, H.normalize)
             
             # print(integration_domain)
             prob = estimate_probabilities(model, integration_domain, dim, H.discrete).item()
@@ -236,13 +376,15 @@ def run_query_test_eval(H, model, table_data, pad_value, logprint, discretizer=N
         
         # print(f'prob: {prob}')
         
-        if  math.isnan(prob) or math.isinf(prob):
+        if  math.isnan(prob):
             est_card = 1
             count += 1
-            
+        elif  math.isinf(prob):   
+            est_card = n_rows if prob > 0 else 1
+            count += 1
         else:
             est_card = max(prob * n_rows, 1)
-            # est_card = max(prob.item(), 1)
+            
             if est_card > n_rows:
                 count += 1
                 est_card = n_rows
@@ -290,14 +432,16 @@ def run_test_integrate(H, ema_vae, logprint):
 
 def run_test_reconstruct(H, model, data_valid_or_test, preprocess_fn, logprint):
     print('evaluating')
-    x = data_valid_or_test[0]
-    print(f'x {x[0]}')
+    x = data_valid_or_test[:10]
     target, data_input = preprocess_fn(x)
-    print(f'preprocess x {data_input}')
     with torch.no_grad():
-        samples = model.forward_samples(1, data_input)
+        samples, probs = model.forward_samples(1, data_input)
         
-        print(f'pred_x={samples["pred_x"]}, sample_pred_x={samples["sample_pred_x"]}')
+        for input, sample, prob in zip(data_input, samples, probs):
+            print(f'data_input {input}')
+            print(f'samples {sample}')
+            print(f'prob {prob}')
+            print(f'-------------')
         
 
 def train_ray_tune(config, H, data_train, data_valid_or_test, preprocess_fn, vae, ema_vae, logprint):
@@ -330,11 +474,8 @@ def train_ray_tune(config, H, data_train, data_valid_or_test, preprocess_fn, vae
 
 def main():
     H, logprint = set_up_hyperparams()
-    discretizer = None
-    if H.discrete:
-        H, data_train, data_valid_or_test, preprocess_fn, original_data, discretizer = set_up_data(H)
-    else:
-        H, data_train, data_valid_or_test, preprocess_fn, original_data = set_up_data(H)
+    
+    H, data_train, data_valid_or_test, preprocess_fn, original_data = set_up_data(H)
     writer = SummaryWriter(f'runs/{H.dataset}_{H.test_name}')
     vae, ema_vae = load_vaes(H, logprint)
     '''
@@ -348,8 +489,9 @@ def main():
             if not isinstance(H[k], torch.Tensor):
                 logprint(type='hparam', key=k, value=H[k])
         # vae = vae.module
+        estimate_marginal_kl(H, vae, data_train, preprocess_fn, logprint)
         # run_test_eval(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
-        run_query_test_eval(H, vae, original_data, H.pad_value, logprint, discretizer)
+        run_query_test_eval(H, vae, original_data, preprocess_fn, logprint)
         # run_test_integrate(H, ema_vae, logprint)
         # run_test_reconstruct(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
         '''  
@@ -421,7 +563,7 @@ def main():
         with best_result.checkpoint.as_directory() as checkpoint_dir:
             # The model state dict was saved under `model.pt` by the training function
             best_vae.load_state_dict(torch.load(os.path.join(checkpoint_dir, "checkpoint.pt"))["model"])
-            run_query_test_eval(H, best_vae, original_data, H.pad_value, logprint)
+            run_query_test_eval(H, best_vae, original_data, preprocess_fn, logprint)
              
     elif H.train:
         for i, k in enumerate(sorted(H)):
@@ -431,7 +573,7 @@ def main():
         
         # run_test_integrate(H, ema_vae, logprint)
         # vae = vae.module
-        run_query_test_eval(H, vae, original_data, H.pad_value, logprint, discretizer)
+        run_query_test_eval(H, vae, original_data, preprocess_fn, logprint)
         
     writer.close()
         
