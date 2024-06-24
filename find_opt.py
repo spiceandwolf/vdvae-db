@@ -16,7 +16,7 @@ std_modes = ["learned", "optimal_sigma"]
 mse_modes = ["guassian", "sigma", "pure"]
 normalize = ["normalize", "minmax"]
 vae_types = ["vanilla_vae", "2_stage_vae", "hvae"]
-remark = "test_vanilla_vae/optimal_sigma"
+remark = "test_vanilla_vae/optimal_sigma/no_equation_predicates"
 restore_dict_path = "/home/user/oblab/vdvae-db/saved_models/power_test"
 
 count = len(dec_blocks_list)*len(mse_modes)*len(learning_rate_list)

@@ -221,7 +221,8 @@ def SampleTupleThenRandom(all_cols,
     idxs = rng.choice(len(all_cols), replace=False, size=num_filters)
     cols = np.take(all_cols, idxs)
 
-    ops = rng.choice(['<=', '>=', '='], size=num_filters)
+    # ops = rng.choice(['<=', '>=', '='], size=num_filters)
+    ops = rng.choice(['<=', '>='], size=num_filters)
     # ops = rng.choice(['='])
 
     if num_filters == len(all_cols):

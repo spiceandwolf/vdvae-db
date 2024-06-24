@@ -489,7 +489,7 @@ def main():
             if not isinstance(H[k], torch.Tensor):
                 logprint(type='hparam', key=k, value=H[k])
         # vae = vae.module
-        estimate_marginal_kl(H, vae, data_train, preprocess_fn, logprint)
+        # estimate_marginal_kl(H, vae, data_train, preprocess_fn, logprint)
         # run_test_eval(H, ema_vae, data_valid_or_test, preprocess_fn, logprint)
         run_query_test_eval(H, vae, original_data, preprocess_fn, logprint)
         # run_test_integrate(H, ema_vae, logprint)
