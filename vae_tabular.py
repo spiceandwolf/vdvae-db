@@ -187,12 +187,12 @@ class bottom_up(HModule):
 
 
 class DecBlock(nn.Module):
-    def __init__(self, H, res, mixin, n_blocks):
+    def __init__(self, H, res, mixin, n_blocks, dec_width):
         super().__init__()
         self.base = res
         self.mixin = mixin
         self.H = H
-        self.widths = get_width_settings(H.width, H.custom_width_str)
+        self.widths = get_width_settings(dec_width, H.custom_width_str)
         
         width = self.widths[res]
         use_3x1 = res > 2
@@ -315,7 +315,7 @@ class top_down(HModule):
         blocks = parse_layer_string(H.dec_blocks)
         
         for idx, (res, mixin) in enumerate(blocks):
-            dec_blocks.append(DecBlock(H, res, mixin, n_blocks=len(blocks)))
+            dec_blocks.append(DecBlock(H, res, mixin, n_blocks=len(blocks), dec_width=H.width))
             resos.add(res)
             
         self.resolutions = sorted(resos)
@@ -676,30 +676,28 @@ class Two_stage_vae(HModule):
     
     def build(self):
         H = self.H
-        self.in_conv = get_3x1(H.image_channels, H.width)
-        self.encoder = Block(H.width, int(H.width * H.bottleneck_multiple), H.width, residual=False, use_3x1=H.width > 2)
-        self.decoder = DecBlock(H, H.width, None, 1)
-        self.out_net = OutPutNet(H)
+        self.encoder = Block(H.zdim, int(H.zdim * H.bottleneck_multiple), H.zdim, residual=False, use_3x1=H.zdim > 2)
+        self.decoder = DecBlock(H, H.zdim, None, 1, H.zdim)
+        self.out_conv = Conv1DLayer(H.zdim, H.zdim, kernel_size=1, stride=1, padding=0) 
+        self.sigma = nn.Parameter(torch.ones(1, H.zdim, H.width), requires_grad=False if H.std_mode == 'optimal_sigma' else True)
     
-    def forward(self, x, target):
+    def forward(self, z, target):
         # print(f'z {x.shape}')
-        activations = self.encoder.forward(x)
-        z, _, kl, _ = self.decoder.sample(x, activations)
-        out_dict = self.out_net.gaussian_nll(x, z, 'learned')
+        activations = self.encoder.forward(z)
+        u, z_rec, kl, _ = self.decoder.sample(z, activations)
+        z_mu = self.out_conv(z_rec)
+        z_std = ((z - z_mu) ** 2).mean([0], keepdim=True)
+        self.sigma = nn.Parameter(0.5 * (self.sigma + z_std), requires_grad=False)
         
         # print(f'nll {out_dict["nll"].shape}')
         # print(f'kl {kl.shape}')
         
-        nll_axis = list(range(1, len(out_dict['nll'].size())))
-        nll = out_dict['nll'].sum(dim=nll_axis)
-        mse_axis = list(range(1, len(out_dict['mse'].size())))
-        mse = out_dict['mse'].sum(dim=mse_axis)
-        kl_axis = list(range(1, len(kl.size())))
-        kl = kl.sum(dim=kl_axis)
+        mse = torch.pow((z - z_mu), 2)
+        nll = 0.5 * mse / z_std + torch.log(z_std) + 0.5 * np.log(2 * np.pi)
         
         nelbo = (nll + kl)
         
-        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl.mean(), mse=mse.mean()), out_dict['sigma'] 
+        return dict(nelbo=nelbo.mean(), recon=-nll.mean(), kl_dist=kl.mean(), mse=mse.mean()), z_std 
     
     def elbo(self, first_stage_vae, x):
         """only support to vanilla_vae currently
@@ -711,20 +709,19 @@ class Two_stage_vae(HModule):
         Returns:
             tensor: elbo
         """
+        # latents reconstruct
         z = first_stage_vae.forward_get_latents(x)[0]['z']
         activations = self.encoder.forward(z)
-        z_rec, _, kl, distr_params = self.decoder.sample(z, activations)
-        out_dict = self.out_net.gaussian_nll(z, z_rec, 'learned')
+        u, z_rec, kl, distr_params = self.decoder.sample(z, activations)
+        z_mu = self.out_conv(z_rec)
         
-        nll_axis = list(range(1, len(out_dict['nll'].size())))
-        nll = out_dict['nll'].sum(dim=nll_axis)
-        kl_axis = list(range(1, len(kl.size())))
-        kl = kl.sum(dim=kl_axis)
+        mse = torch.pow((z - z_mu), 2)
+        nll = 0.5 * mse / self.sigma + torch.log(self.sigma) + 0.5 * np.log(2 * np.pi)
         
         second_stage_elbo = -nll - kl
         
         latents = [(distr_params['qm'], distr_params['qv'])]
-        
+        # reconstruct
         stats, _ = first_stage_vae.forward(x, x, latents)
         first_stage_elbo = -stats['nelbo']
         

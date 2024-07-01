@@ -16,11 +16,11 @@ std_modes = ["learned", "optimal_sigma"]
 mse_modes = ["guassian", "sigma", "pure"]
 normalize = ["normalize", "minmax"]
 vae_types = ["vanilla_vae", "2_stage_vae", "hvae"]
-remark = "test_vanilla_vae/optimal_sigma/no_equation_predicates"
+remark = "test_2_stage_vae/optimal_sigma/"
 restore_dict_path = "/home/user/oblab/vdvae-db/saved_models/power_test"
 
 count = len(dec_blocks_list)*len(mse_modes)*len(learning_rate_list)
-num = 2
+num = 3
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--test', action="store_true")
@@ -30,7 +30,7 @@ if args.test:
     test_name = "test_" + str(num)
     os.system(f'python train_tabular.py --hps power --remarks {remark} --{operate[2]} '
                 # f'--discrete '
-                f'--vae_type {vae_types[0]} '
+                f'--vae_type {vae_types[1]} '
                 f'--lr {learning_rate_list[0]} '
                 f'--dec_blocks {dec_blocks_list[0]} '
                 f'--enc_blocks {enc_blocks_list[0]} '
@@ -51,7 +51,7 @@ else:
                     os.system(f'python train_tabular.py --hps power --remarks {remark} --{operate[0]} '
                                 # f'--tuning_recover '
                                 # f'--discrete '
-                                f'--vae_type {vae_types[0]} '
+                                f'--vae_type {vae_types[1]} '
                                 f'--lr {lr} '
                                 f'--dec_blocks {dec_blocks} '
                                 f'--enc_blocks {enc_blocks} '

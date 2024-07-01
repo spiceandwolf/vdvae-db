@@ -26,7 +26,7 @@ power.dataset = 'power'
 power.n_batch = 2048
 power.ema_rate = 0.9999
 power.data_root = '/home/user/oblab/dataset/'
-power.num_epochs = 20
+power.num_epochs = 100
 power.desc = 'power_test'
 power.skip_threshold = -1.
 power.grad_clip = 30000
@@ -34,6 +34,7 @@ power.decay_iters = 18000
 power.decay_start = 32
 power.noise_value = '0.0005, 0.0005, 0.005, 0.05, 0.5, 0.5, 0.5'
 power.encoding_modes = 'binary,binary,binary,binary,binary,binary,binary'
+power.first_stage_percent = 0.4
 HPARAMS_REGISTRY['power'] = power
 
 def parse_args_and_update_hparams(H, parser, s=None):

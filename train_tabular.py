@@ -170,6 +170,7 @@ def train_loop(H, data_train, data_valid, preprocess_fn, vae, ema_vae, logprint,
                 first_stage_stats = vae.forward_get_latents(data_input)
             z_train.append(first_stage_stats[0]['z'].cpu())
         z_train = torch.cat(z_train, dim=0) 
+        print(f'z_train {z_train.shape}')
         
         z_valid = []
         valid_sampler = RandomSampler(data_valid)
