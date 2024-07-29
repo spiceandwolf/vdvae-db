@@ -19,26 +19,26 @@ power.width = 7
 power.min_lr = 1e-6
 power.zdim = 16
 power.wd = 0.
-# power.dec_blocks = "1x1,4m1,4x1,7m4,7x1" # x corresponds to residual block, m corresponds to unpool layer
-# power.enc_blocks = "7x1,7d2,4x1,4d4,1x1" # x corresponds to residual block, d corresponds to pool layer
+power.dec_blocks = "7x1" # x corresponds to residual block, m corresponds to unpool layer
+power.enc_blocks = "7x3" # x corresponds to residual block, d corresponds to pool layer
 power.warmup_iters = 32
 power.dataset = 'power'
 power.n_batch = 2048
 power.ema_rate = 0.9999
-power.data_root = '/home/user/oblab/dataset/'
-power.num_epochs = 100
+power.data_root = '../dataset/'
+power.num_epochs = 30
 power.desc = 'power_test'
 power.skip_threshold = -1.
 power.grad_clip = 30000
 power.decay_iters = 18000
 power.decay_start = 32
-power.noise_value = '0.0005, 0.0005, 0.005, 0.05, 0.5, 0.5, 0.5'
+power.noise_value = '0.0005,0.0005,0.005,0.05,0.5,0.5,0.5'
 power.encoding_modes = 'binary,binary,binary,binary,binary,binary,binary'
-power.first_stage_percent = 0.4
+power.second_stage_percent = 0.4
 HPARAMS_REGISTRY['power'] = power
 
 def parse_args_and_update_hparams(H, parser, s=None):
-    args = parser.parse_args(s)
+    args = parser.parse_known_args(s)[0]
     valid_args = set(args.__dict__.keys())
     hparam_sets = [x for x in args.hparam_sets.split(',') if x]
     for hp_set in hparam_sets:
@@ -47,7 +47,7 @@ def parse_args_and_update_hparams(H, parser, s=None):
             if k not in valid_args:
                 raise ValueError(f"{k} not in default args")
         parser.set_defaults(**hps)
-    H.update(parser.parse_args(s).__dict__)
+    H.update(parser.parse_known_args(s)[0].__dict__)
 
 
 def add_vae_arguments(parser):
@@ -57,7 +57,7 @@ def add_vae_arguments(parser):
     parser.add_argument('--data_root', type=str, default='./')
 
     parser.add_argument('--desc', type=str, default='test')
-    parser.add_argument('--hparam_sets', '--hps', type=str)
+    parser.add_argument('--hparam_sets', '--hps', type=str, default='power')
     parser.add_argument('--restore_path', type=str, default=None)
     parser.add_argument('--restore_ema_path', type=str, default=None)
     parser.add_argument('--restore_log_path', type=str, default=None)
@@ -100,29 +100,29 @@ def add_vae_arguments(parser):
     parser.add_argument('--iters_per_save', type=int, default=10000)
     parser.add_argument('--iters_per_images', type=int, default=10000)
     parser.add_argument('--epochs_per_eval', type=int, default=20)
-    parser.add_argument('--epochs_per_probe', type=int, default=None)
+    # parser.add_argument('--epochs_per_probe', type=int, default=None)
     parser.add_argument('--epochs_per_eval_save', type=int, default=20)
     parser.add_argument('--num_images_visualize', type=int, default=8)
     parser.add_argument('--num_variables_visualize', type=int, default=6)
     parser.add_argument('--num_temperatures_visualize', type=int, default=3)
     
-    parser.add_argument('--test_name', type=str, default=None)
+    parser.add_argument('--test_name', type=str, default='test')
     parser.add_argument('--noise_value', type=str, default=None)
     parser.add_argument('--noise_type', type=str, default='None')
-    parser.add_argument('--normalize', type=str, default='minmax')
+    parser.add_argument('--normalize', type=str, default='normalize')
     parser.add_argument('--gradient_smoothing_beta', type=float, default=0.6931472)
     parser.add_argument('--last_epoch', type=int, default=-1)
     parser.add_argument('--decay_iters', type=int, default=0)
     parser.add_argument('--decay_start', type=int, default=0)
-    parser.add_argument('--out_net_mode', type=str, default='')
-    parser.add_argument('--mse_mode', type=str, default='')
-    parser.add_argument('--std_mode', type=str, default='')
+    parser.add_argument('--out_net_mode', type=str, default='gaussian')
+    parser.add_argument('--mse_mode', type=str, default='guassian')
+    parser.add_argument('--std_mode', type=str, default='optimal_sigma')
     parser.add_argument('--remarks', type=str, default='')
     parser.add_argument('--train_ray_tune', action="store_true")
     parser.add_argument('--tuning_recover', action="store_true")
     parser.add_argument('--discrete', action="store_true")
-    parser.add_argument('--encoding_modes', type=str, default='')
+    parser.add_argument('--encoding_modes', type=str, default=None)
     parser.add_argument('--vae_type', type=str, default='vanilla_vae')
-    parser.add_argument('--first_stage_percent', type=float, default='0.5')
+    parser.add_argument('--second_stage_percent', type=float, default=0.6)
     
     return parser

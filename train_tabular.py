@@ -330,6 +330,33 @@ def run_query_test_eval(H, model, table_data, preprocess_fn, logprint):
     count = 0
     
     import math
+    from queue import SimpleQueue
+    import treeQuadrature as tq
+    
+    def tq_test(elbo, x, y, maxs, mins):
+        p = 40 # minimum number of draws per leaf container
+        root = tq.Container(x, y, maxs=maxs, mins=mins)
+        # Construct tree using a FIFO queue
+        finished_containers = []
+        q = SimpleQueue()
+        q.put(root)
+
+        while not q.empty():
+
+            c = q.get()
+
+            if c.N <= p:
+                finished_containers.append(c)
+            else:
+                children = tq.splits.minSseSplit(c)
+                for child in children:
+                    q.put(child)
+
+        # Integrate containers
+        contributions = [tq.containerIntegration.randomIntegral(cont, elbo, n=100) for cont in finished_containers]
+        int_approx = np.sum(contributions)
+        
+        return int_approx, finished_containers, contributions
     
     # Test
     for i in range(3000):
@@ -370,7 +397,14 @@ def run_query_test_eval(H, model, table_data, preprocess_fn, logprint):
             integration_domain = make_points(table_stats, predicates, table_data.bias, H.noise_type, H.normalize)
             
             # print(integration_domain)
-            prob = estimate_probabilities(model, integration_domain, dim, H.discrete).item()
+            # prob = estimate_probabilities(model, integration_domain, dim, H.discrete).item()
+            maxs = []
+            mins = []
+            for bound in integration_domain:
+                mins.append(bound[0])
+                maxs.append(bound[1])
+                
+            prob, _, _ = tq_test(model.elbo, integration_domain[0], integration_domain[1], mins=mins, maxs=maxs)
             
         # return
         

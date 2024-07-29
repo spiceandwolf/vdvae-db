@@ -306,7 +306,7 @@ class CsvTable(Table):
               datatype.
             pg_name: optional str, a convenient field for specifying what name
               this table holds in a Postgres database.
-            pg_name: optional list of str, a convenient field for specifying
+            pg_cols: optional list of str, a convenient field for specifying
               what names this table's columns hold in a Postgres database.
             **kwargs: keyword arguments that will be pass to pd.read_csv().
         """
@@ -330,7 +330,7 @@ class CsvTable(Table):
         
     def _load(self, filename, cols, **kwargs):
 
-        df = pd.read_csv(filename, usecols=cols, **kwargs)
+        df = pd.read_csv(filename, usecols=cols, **kwargs).sample(frac=1).reset_index(drop=True)
         if cols is not None:
             df = df[cols]
 

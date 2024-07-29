@@ -17,14 +17,14 @@ mse_modes = ["guassian", "sigma", "pure"]
 normalize = ["normalize", "minmax"]
 vae_types = ["vanilla_vae", "2_stage_vae", "hvae"]
 remark = "test_2_stage_vae/optimal_sigma/"
-restore_dict_path = "/home/user/oblab/vdvae-db/saved_models/power_test"
+restore_dict_path = "./saved_models/power_test"
 
 count = len(dec_blocks_list)*len(mse_modes)*len(learning_rate_list)
 num = 3
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--test', action="store_true")
-args = parser.parse_args()
+args = parser.parse_known_args()[0]
 
 if args.test:
     test_name = "test_" + str(num)

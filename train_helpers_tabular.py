@@ -110,7 +110,7 @@ def setup_save_dirs(H):
 
 def update_hparams(H, s):
     parser = argparse.ArgumentParser()
-    H.update(parser.parse_args(s).__dict__)
+    H.update(parser.parse_known_args(s)[0].__dict__)
     H.logprint(f'update')
     for i, k in enumerate(sorted(H)):
         H.logprint(type='hparam', key=k, value=H[k])
