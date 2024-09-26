@@ -151,7 +151,7 @@ def flatten(outer):
 def power(H):
     csv_file = os.path.join(H.data_root, 'household_power_consumption.txt')
     cols = ['Global_active_power','Global_reactive_power','Voltage','Global_intensity','Sub_metering_1','Sub_metering_2','Sub_metering_3']
-    trX = CsvTable(H, 'power', csv_file, cols, sep=';', na_values=[' ', '?'], header=0, dtype=np.float64)      
+    trX = CsvTable('power', csv_file, cols, sep=';', na_values=[' ', '?'], header=0, dtype=np.float64, H=H)      
     trX.data = trX.data.dropna(axis=0, how='any')
     trX.data = trX.data.sample(frac=1).reset_index(drop=True)
     
@@ -256,8 +256,6 @@ class Table(object):
             self.pg_name = pg_name
         else:
             self.pg_name = name
-            
-        self
 
     def __repr__(self):
         return '{}({})'.format(self.name, self.columns)
@@ -287,23 +285,23 @@ class CsvTable(Table):
     """Wraps a CSV file or pd.DataFrame as a Table."""
 
     def __init__(self,
-                 H,
                  name,
                  filename_or_df,
                  cols,
                  type_casts={},
+                 H=None,
                  pg_name=None,
                  pg_cols=None,
                  **kwargs):
         """Accepts the same arguments as pd.read_csv().
 
         Args:
-            H: hps list.
             filename_or_df: pass in str to reload; otherwise accepts a loaded
               pd.Dataframe.
             cols: list of column names to load; can be a subset of all columns.
             type_casts: optional, dict mapping column name to the desired numpy
               datatype.
+            H: optional hps list.
             pg_name: optional str, a convenient field for specifying what name
               this table holds in a Postgres database.
             pg_cols: optional list of str, a convenient field for specifying
@@ -321,8 +319,9 @@ class CsvTable(Table):
 
         self.columns = self._build_columns(self.data, cols, type_casts, pg_cols)
         
-        self.bias = self._set_bias(H)
-        self.cols_size = self._set_cols_size(H)
+        if H is not None:
+            self.bias = self._set_bias(H)
+            self.cols_size = self._set_cols_size(H)
         self.maxs = self.data.max().values
         self.mins = self.data.min().values
         
@@ -331,6 +330,7 @@ class CsvTable(Table):
     def _load(self, filename, cols, **kwargs):
 
         df = pd.read_csv(filename, usecols=cols, **kwargs).sample(frac=1).reset_index(drop=True)
+        df = df.dropna(axis=0, how='any')
         if cols is not None:
             df = df[cols]
 
