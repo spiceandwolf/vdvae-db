@@ -166,3 +166,4 @@ runs/
 results/
 treeQuadrature/
 my_model/
+wandb/
