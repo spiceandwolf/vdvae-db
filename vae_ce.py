@@ -443,7 +443,7 @@ class MissIWAE(VAE):
                 # softmax each attr's feature then binary_cross_entropy
                 start = 0
                 for i in range(len(self.input_bins)):
-                    recon_xb[:, start: start + self.input_bins[i], :] = self._gumbel_softmax(recon_x[:, start: start + self.input_bins[i], :], tau = 0.01, dim = 1).float()
+                    recon_xb[:, start: start + self.input_bins[i], :] = F.gumbel_softmax(recon_x[:, start: start + self.input_bins[i], :], tau = 0.01, dim = 1).float()
                     start += self.input_bins[i]
                     
                 recon_loss = (
@@ -460,8 +460,11 @@ class MissIWAE(VAE):
                 start = 0
                 recon_xb = ~self.mask * recon_x
                 for i in range(len(self.input_bins)):
-                    xb = self._gumbel_softmax(recon_x[:, start: start + self.input_bins[i], :], tau = 1, dim = 1).float()
-                    recon_loss += F.cross_entropy(
+                    xb = self._gumbel_softmax_logits(recon_x[:, start: start + self.input_bins[i], :], tau = 1, dim = 1).float()
+                    if torch.isnan(xb).any():
+                        print(f'xb: {xb}')
+                        print(f'recon_x: {recon_x[:, start: start + self.input_bins[i], :]}')
+                    recon_loss += F.nll_loss(
                         xb,
                         x[:, i, :].long(),
                         reduction="none",
@@ -476,6 +479,13 @@ class MissIWAE(VAE):
         log_w = -(recon_loss + KLD).float() # (bs, n_samples)
 
         w_tilde = F.log_softmax(log_w, dim=1).exp().detach()
+        
+        if torch.isnan(recon_loss).any():
+            raise ValueError("w_tilde recon_loss contains NaN values")
+        if torch.isnan(KLD).any():
+            raise ValueError("w_tilde KLD contains NaN values")
+        if torch.isnan(log_w).any():
+            raise ValueError("log_w contains NaN values")
 
         return (
             -(w_tilde * log_w).sum(1).mean(),
@@ -489,7 +499,7 @@ class MissIWAE(VAE):
         eps = torch.randn_like(std)
         return mu + eps * std, eps
     
-    def _gumbel_softmax(self, logits: torch.Tensor, tau: float = 1, hard: bool = False, eps: float = 1e-10, dim: int = -1) -> torch.Tensor:
+    def _gumbel_softmax_logits(self, logits: torch.Tensor, tau: float = 1, hard: bool = False, eps: float = 1e-10, dim: int = -1) -> torch.Tensor:
         '''
         replace logsoftmax with softmax
         '''
@@ -498,7 +508,9 @@ class MissIWAE(VAE):
             -torch.empty_like(logits, memory_format=torch.legacy_contiguous_format).exponential_().log()
         )  # ~Gumbel(0,1)
         gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
-        y_soft = gumbels.log_softmax(dim).exp()
+        gumbels_minus_max = gumbels - gumbels.max(dim, keepdim=True)[0]
+        y = gumbels_minus_max.exp()
+        y_soft = (y / y.sum(axis=dim, keepdim=True)).detach()
 
         if hard:
             # Straight through.
@@ -613,7 +625,7 @@ operation = 'train' # train or eval
 
 if operation == 'train':
     n_epoch = 10
-    lr = 4e-3
+    lr = 5e-3
     training_config = BaseTrainerConfig(
         output_dir = './saved_models/power_test/imputated_ce',
         learning_rate = lr,
@@ -656,22 +668,18 @@ if operation == 'train':
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
 
-    # with torch.autograd.detect_anomaly():
-    #     pipeline(
-    #         train_data=table,
-    #         # eval_data=table,
-    #         callbacks=callbacks,
-    #     )
-        
-    try:
+    with torch.autograd.detect_anomaly():
         pipeline(
             train_data=table,
             # eval_data=table,
             callbacks=callbacks,
         )
-    except Exception as e:
-        print(str(e))
-        wandb_cb.on_epoch_end(training_config)
+        
+    # pipeline(
+    #     train_data=table,
+    #     # eval_data=table,
+    #     callbacks=callbacks,
+    # )
 
 elif operation == 'eval':
     
