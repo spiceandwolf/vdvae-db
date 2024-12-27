@@ -167,3 +167,6 @@ results/
 treeQuadrature/
 my_model/
 wandb/
+power/data.pkl
+logs-vdvae_ce/
+logs-vae_ce/

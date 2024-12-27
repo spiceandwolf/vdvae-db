@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from pythae.data.datasets import DatasetOutput, BaseDataset
 
-rnd = 42
+rnd = 2024 # binary_cross_entropy use
 
 np.random.seed(rnd)
 
@@ -104,28 +104,6 @@ def One_hot(tuples_np):
     print(f'onehot encoding time: {time.time() - start_time}s')
     return np.concatenate(onehot_datas, 1)
 
-# def One_hot(tuples_np, columns):
-#     '''
-#     Args:
-#         data: tensor.
-#     '''
-#     print('start onehot encoding!')
-#     start_time = time.time()
-#     y_onehots = []
-#     tuples = tuples_np.astype(int)
-#     input_bins = [c.DistributionSize() for c in columns]
-#     # print(f'input_bins : {input_bins}')
-#     for data in tuples:
-#         y_onehot = []
-#         for i, coli_dom_size in enumerate(input_bins):
-#             y_coli = np.zeros(coli_dom_size)
-#             y_coli[data[i]] = 1
-#             y_onehot.append(y_coli)
-#         y_onehots.append(np.concatenate(y_onehot))
-#     # [bs, sum(dist size)]
-#     print(f'onehot encoding time: {time.time() - start_time}s')
-#     return np.stack(y_onehots, 0)   
-
 def Mask(onehot_data_np, perc_miss, batch_size = 1024):
     start_time = time.time()
     masks = []
@@ -216,19 +194,20 @@ class ResBlock_FC(nn.Module):
         super(ResBlock_FC, self).__init__()
         assert out_channels==in_channels 
         self.linear_layer1 = nn.Sequential(
-                        nn.BatchNorm1d(in_channels),
-                        nn.ReLU(inplace=True),
-                        nn.Linear(in_channels, middle_channels, bias=False))
-        self.linear_layer2 = nn.Sequential(
+                        nn.Linear(in_channels, middle_channels, bias=False),
                         nn.BatchNorm1d(middle_channels),
-                        nn.ReLU(inplace=True),
-                        nn.Linear(middle_channels, out_channels, bias=False))   
+                        nn.ReLU())
+
+        self.linear_layer2 = nn.Sequential(
+                        nn.Linear(middle_channels, out_channels, bias=False),
+                        nn.BatchNorm1d(out_channels),
+                        nn.ReLU())   
         
     def forward(self, x):
         residual = x
-        out = self.linear_layer1(x)
-        out = self.linear_layer2(out)
-        out += residual
+        out1 = self.linear_layer1(x)
+        out2 = self.linear_layer2(out1)
+        out = out2 + residual
         return out
     
 class Encoder_FC_MissIWAE_Power(BaseEncoder):
@@ -253,9 +232,9 @@ class Encoder_FC_MissIWAE_Power(BaseEncoder):
 
     def forward(self, x: torch.Tensor):
         
-        out = self.input_layer(x + self.position_ids) # (bs, hidden_dim)
-        out = self.residual_layers(out) # (bs, hidden_dim)
-        out = self.posterior(out) # (bs, latent_dim * 2)
+        out1 = self.input_layer(x + self.position_ids) # (bs, hidden_dim)
+        out2 = self.residual_layers(out1) # (bs, hidden_dim)
+        out = self.posterior(out2) # (bs, latent_dim * 2)
         embedding, log_covariance = torch.split(out, self.latent_dim, dim=-1)
         output = ModelOutput(
             embedding=embedding,
@@ -270,22 +249,20 @@ class Decoder_FC_MissIWAE_Power(BaseDecoder):
         self.output_dim = args.output_dim
         self.hidden_dim = args.hidden_dim
         self.latent_dim = args.latent_dim
+        self.register_buffer('position_ids', torch.arange(self.output_dim) / self.output_dim)
 
         self.prior = nn.Linear(self.latent_dim, self.hidden_dim, bias=False)
         self.residual_layers = nn.Sequential(
             *[ResBlock_FC(self.hidden_dim, int(self.hidden_dim / 4), self.hidden_dim) for _ in range(2)]
         )
-        self.output_layer = nn.Sequential(
-            nn.ReLU(inplace=True),
-            nn.Linear(self.hidden_dim, self.output_dim),
-            # nn.Sigmoid()
-        )
+        self.output_layer = nn.Linear(self.hidden_dim, self.output_dim)
 
     def forward(self, z: torch.Tensor):
-        out = self.prior(z)
-        out = self.residual_layers(out)
-        out = self.output_layer(out)
-        output = ModelOutput(reconstruction=out)
+        out1 = self.prior(z)
+        out2 = self.residual_layers(out1)
+        out = self.output_layer(out2) + self.position_ids
+        # output = ModelOutput(reconstruction = out) # nll_loss
+        output = ModelOutput(reconstruction = F.sigmoid(out)) # binary_cross_entropy
 
         return output
     
@@ -333,6 +310,7 @@ class MissIWAE(VAE):
         self.n_samples = model_config.number_samples
         self.mask = None
         self.input_bins = model_config.input_bins
+        self.tau = nn.Parameter(torch.ones(len(self.input_bins)))
         # print(f'input_bins {self.input_bins}')
 
     def forward(self, inputs: BaseDataset, **kwargs):
@@ -347,14 +325,19 @@ class MissIWAE(VAE):
 
         """
         
-        x = inputs["data"] # (bs, n_dims)
+        x = inputs["data"].clone().detach() # (bs, n_dims)
+        # print(f'x : {x[0]}')
         # print(f'x {x.device}')
         # xb = self._encode_onehot(x, self.input_bins) # (bs, n_features)
-        xb = inputs["data_one_hot"]
+        xb = inputs["data_one_hot"].clone().detach()
+        xhat = inputs["data_one_hot"].clone().detach()
+        # print(f'xb : {xb[0]}')
         
-        mask = inputs["data_mask"]
+        mask = inputs["data_mask"].clone().detach()
+        # print(f'mask : {mask[0]}')
         
         xb[mask] = 0.5 # in xbhat, the missing values are represented by 0.5
+        # print(f'xb_mask : {xb[0]}')
         
         # self.mask = mask.unsqueeze(-1) # (bs, n_features, 1)
         self.mask = mask.unsqueeze(-1).to(device=xb.device)
@@ -374,10 +357,10 @@ class MissIWAE(VAE):
         recon_xb = self.decoder(z.reshape(-1, self.latent_dim))[
             "reconstruction"
         ].reshape(x.shape[0], -1, self.n_samples) # (bs, n_features, n_samples)
-        # print(f'recon_xb : {recon_xb.shape}')
+        # print(f'recon_xb : {recon_xb[0]}')
         
-        # loss, recon_loss, kld = self.loss_function(recon_xb, inputs["data_one_hot"], mu, log_var, z) # binary_cross_entropy_with_logits
-        loss, recon_loss, kld = self.loss_function(recon_xb, x, mu, log_var, z) # cross_entropy
+        loss, recon_loss, kld = self.loss_function(recon_xb, xhat, mu, log_var, z) # binary_cross_entropy
+        # loss, recon_loss, kld = self.loss_function(recon_xb, x, mu, log_var, z) # cross_entropy
         
         recon_x = torch.zeros((x.shape[0], self.n_samples, x.shape[1]), device=x.device) # (bs, n_samples, n_dims)
         
@@ -401,7 +384,7 @@ class MissIWAE(VAE):
 
         Args:
             recon_x (tensor): (bs, n_features, n_samples)
-            x (tensor): (bs, n_features) -> binary_cross_entropy_with_logits or (bs, n_dims) -> cross_entropy
+            x (tensor): (bs, n_features) -> binary_cross_entropy or (bs, n_dims) -> cross_entropy
             mu (tensor): (bs, n_samples, latent_dim)
             log_var (tensor): (bs, n_samples, latent_dim)
             z (tensor): (bs, n_samples, latent_dim)
@@ -410,82 +393,45 @@ class MissIWAE(VAE):
             elbo, recon_loss, kld
 
         """
-
-        if self.model_config.reconstruction_loss == "mse":
-
-            recon_loss = (
-                0.5
-                * F.mse_loss(
-                    recon_x,
-                    x.reshape(recon_x.shape[0], -1)
-                    .unsqueeze(1)
-                    .repeat(1, self.n_samples, 1),
-                    reduction="none",
-                ).sum(dim=-1)
-            )
-
-        elif self.model_config.reconstruction_loss == "bce":
-
-            recon_loss = F.binary_cross_entropy(
-                recon_x,
-                x.reshape(recon_x.shape[0], -1)
-                .unsqueeze(1)
-                .repeat(1, self.n_samples, 1),
-                reduction="none",
-            ).sum(dim=-1)
+        recon_loss = torch.zeros(recon_x.size()[0], self.n_samples, device=recon_x.device) # (bs, n_samples)     
+        if self.model_config.reconstruction_loss == "obsce":
             
-        elif self.model_config.reconstruction_loss == "obsce":
-            
-            x = x.reshape(recon_x.shape[0], -1).unsqueeze(-1).repeat(1, 1, self.n_samples) # (bs, n_dims, n_samples) or (bs, n_features, n_samples)
-            recon_xb = torch.zeros_like(recon_x)
-            if x.shape == recon_x.shape:
+            xhat = x.reshape(recon_x.shape[0], -1).unsqueeze(-1).repeat(1, 1, self.n_samples) # (bs, n_dims, n_samples) or (bs, n_features, n_samples)
+            start = 0
+            if xhat.shape == recon_x.shape:
                 # mask ->(bs, n_features, 1) * entropy -> (bs, n_features, n_samples)
                 # softmax each attr's feature then binary_cross_entropy
-                start = 0
                 for i in range(len(self.input_bins)):
-                    recon_xb[:, start: start + self.input_bins[i], :] = F.gumbel_softmax(recon_x[:, start: start + self.input_bins[i], :], tau = 0.01, dim = 1).float()
-                    start += self.input_bins[i]
+                    # recon_xb = F.log_softmax(recon_x[:, start: start + self.input_bins[i], :], dim = 1).exp().float() 
+                    recon_xb = self._log_gumbel_softmax(recon_x[:, start: start + self.input_bins[i], :], dim = 1).exp().float() 
                     
-                recon_loss = (
-                    ~self.mask
-                    * F.binary_cross_entropy(
-                        recon_xb,
-                        x,
-                        reduction="none",   
-                    ).float() 
-                ).sum(dim=1) # (bs, n_samples)
+                    recon_loss += (
+                        ~self.mask[:, start: start + self.input_bins[i], :] * 
+                        F.binary_cross_entropy(recon_xb, xhat[:, start: start + self.input_bins[i], :], reduction="none",) 
+                    ).float().sum(dim=1) # (bs, n_samples)
+                    
+                    start += self.input_bins[i]
                 
             else:
-                recon_loss = torch.zeros(recon_x.size()[0], self.n_samples, device=recon_x.device) # (bs, n_samples)
-                start = 0
                 recon_xb = ~self.mask * recon_x
                 for i in range(len(self.input_bins)):
-                    xb = self._gumbel_softmax_logits(recon_x[:, start: start + self.input_bins[i], :], tau = 1, dim = 1).float()
-                    if torch.isnan(xb).any():
-                        print(f'xb: {xb}')
-                        print(f'recon_x: {recon_x[:, start: start + self.input_bins[i], :]}')
-                    recon_loss += F.nll_loss(
-                        xb,
-                        x[:, i, :].long(),
-                        reduction="none",
-                    )
+                    xb = self._log_gumbel_softmax(recon_xb[:, start: start + self.input_bins[i], :], tau = 1, dim = 1).float()
+                    
+                    recon_loss += F.nll_loss(xb, xhat[:, i, :].long(), reduction="none",)
                     start += self.input_bins[i]
             
-        log_q_z = (-0.5 * (log_var + torch.pow(z - mu, 2) / (log_var.exp() + 10e-7))).float().sum(dim=-1) # (bs, n_samples)
+        log_q_z = (-0.5 * (log_var + ((torch.pow(z - mu, 2) + 1e-10).log() - log_var).exp())).float().sum(dim=-1) # (bs, n_samples)
+        # log_q_z = (-0.5 * (log_var + torch.pow(z - mu, 2) / (log_var.exp() + 10e-7))).float().sum(dim=-1) # (bs, n_samples)
         log_p_z = -0.5 * (z ** 2).float().sum(dim=-1) # (bs, n_samples)
 
         KLD = -(log_p_z - log_q_z)
 
         log_w = -(recon_loss + KLD).float() # (bs, n_samples)
 
-        w_tilde = F.log_softmax(log_w, dim=1).exp().detach()
-        
-        if torch.isnan(recon_loss).any():
-            raise ValueError("w_tilde recon_loss contains NaN values")
-        if torch.isnan(KLD).any():
-            raise ValueError("w_tilde KLD contains NaN values")
-        if torch.isnan(log_w).any():
-            raise ValueError("log_w contains NaN values")
+        # w_tilde = F.log_softmax(log_w, dim=1).exp().detach()
+        log_w_minus_max = log_w - log_w.max(1, keepdim=True)[0]
+        w = log_w_minus_max.exp()
+        w_tilde = (w / w.sum(axis=1, keepdim=True)).detach()        
 
         return (
             -(w_tilde * log_w).sum(1).mean(),
@@ -499,7 +445,7 @@ class MissIWAE(VAE):
         eps = torch.randn_like(std)
         return mu + eps * std, eps
     
-    def _gumbel_softmax_logits(self, logits: torch.Tensor, tau: float = 1, hard: bool = False, eps: float = 1e-10, dim: int = -1) -> torch.Tensor:
+    def _log_gumbel_softmax(self, logits: torch.Tensor, tau = 1, hard: bool = False, eps: float = 1e-10, dim: int = -1) -> torch.Tensor:
         '''
         replace logsoftmax with softmax
         '''
@@ -508,9 +454,10 @@ class MissIWAE(VAE):
             -torch.empty_like(logits, memory_format=torch.legacy_contiguous_format).exponential_().log()
         )  # ~Gumbel(0,1)
         gumbels = (logits + gumbels) / tau  # ~Gumbel(logits,tau)
+        # logsoftmax to avoid overflow or underflow
         gumbels_minus_max = gumbels - gumbels.max(dim, keepdim=True)[0]
         y = gumbels_minus_max.exp()
-        y_soft = (y / y.sum(axis=dim, keepdim=True)).detach()
+        y_soft = (y / y.sum(axis=dim, keepdim=True)).log().detach()
 
         if hard:
             # Straight through.
@@ -527,11 +474,9 @@ class MissIWAE(VAE):
         probe
 
         Args:
-            x (tensor): (bs, n_features) 
-            mask (tensor): (bs, n_features)
-
+            
         Returns:
-            elbo, recon_loss, kld
+            
 
         """
 
@@ -552,14 +497,16 @@ class MissIWAE(VAE):
         ].reshape(x.shape[0], n_samples, -1) # (bs, n_samples, n_features)
         
         start = 0
+        recon_xb = torch.zeros((x.shape[0], n_samples, x.shape[1]), device=x.device) # (bs, n_samples, n_features)
         for i in range(len(self.input_bins)):
-            recon_x[:, start: start + self.input_bins[i], :] = F.softmax(recon_x[:, start: start + self.input_bins[i], :], 1).float()
+            # recon_x[:, start: start + self.input_bins[i], :] = F.softmax(recon_x[:, start: start + self.input_bins[i], :], 1).float()
+            recon_xb[:, :, start: start + self.input_bins[i]] = self._log_gumbel_softmax(recon_x[:, :, start: start + self.input_bins[i]], -1).exp().float()
             start += self.input_bins[i]
             
         recon_loss = (
             ~mask
             * F.binary_cross_entropy(
-                recon_x,
+                recon_xb,
                 x.reshape(recon_x.shape[0], -1).unsqueeze(1).repeat(1, n_samples, 1),
                 reduction="none",   
             ).float() 
@@ -569,14 +516,20 @@ class MissIWAE(VAE):
         log_p_z = -0.5 * (z ** 2).sum(dim=-1) # (bs, n_samples)
         
         imp_weights = F.softmax(recon_loss + log_p_z - log_q_z, 1).reshape(-1, recon_x.shape[0]) # (n_samples, bs)
-        recon_x = recon_x.reshape(n_samples, recon_x.shape[0], -1) # (n_samples, bs, n_features)
+        xms = torch.zeros_like(recon_xb) # (bs, n_samples, n_features)
+        start = 0
+        for i in range(len(self.input_bins)):
+            # recon_x[:, start: start + self.input_bins[i], :] = F.softmax(recon_x[:, start: start + self.input_bins[i], :], 1).float()
+            xms[:, :, start: start + self.input_bins[i]] = self._log_gumbel_softmax(recon_x[:, :, start: start + self.input_bins[i]], -1).exp().float()
+            start += self.input_bins[i]
+        xms = xms.reshape(n_samples, recon_x.shape[0], -1) # (n_samples, bs, n_features)
+        xm = torch.einsum('ki,kij->ij', imp_weights, xms) # (bs, n_features)
         
-        xm = torch.einsum('ki,kij->ij', imp_weights, recon_x) # (bs, n_features)
-        # print(f'xm : {xm.shape}')
         recon_probe = torch.ones(recon_x.size()[0], 1, device=recon_x.device) # (bs, 1)
         start = 0
         for i in range(len(self.model_config.input_bins)):
-            probs_i = F.softmax(xm[:, start : start + self.model_config.input_bins[i]], 1) * mask[:, start : start + self.model_config.input_bins[i]]
+            probs_i = F.softmax(xm[:, start : start + self.model_config.input_bins[i]], 1) * mask[:, start : start + self.model_config.input_bins[i]] # better
+            # probs_i = xm[:, start : start + self.model_config.input_bins[i]] * mask[:, start : start + self.model_config.input_bins[i]]
             probs_i = probs_i.sum(dim=1)
             # print(f'probs_i : {probs_i.shape}')
             recon_probe *= probs_i
@@ -586,7 +539,7 @@ class MissIWAE(VAE):
         
 model_config = MissIWAEConfig(
     input_dim = sum(input_bins),
-    latent_dim = 16,
+    latent_dim = 128,
     output_dim = sum(input_bins),
     hidden_dim = 256,
     input_bins = tuple(input_bins),
@@ -621,31 +574,28 @@ def linear_warmup(warmup_iters):
     return f
 
 ''''''
-operation = 'train' # train or eval
+operation = 'eval' # train or eval
 
 if operation == 'train':
     n_epoch = 10
-    lr = 5e-3
+    lr = 1e-3
     training_config = BaseTrainerConfig(
         output_dir = './saved_models/power_test/imputated_ce',
         learning_rate = lr,
-        per_device_train_batch_size = 512,
+        per_device_train_batch_size = 1024,
         per_device_eval_batch_size = 1024,
         steps_saving = None,
         num_epochs = n_epoch,
         train_dataloader_num_workers = 4,
         eval_dataloader_num_workers = 4,
-        optimizer_cls = "AdamW",
+        optimizer_cls = "Adam",
         optimizer_params = {
             "betas" : (0.99, 0.999),
             },
-        scheduler_cls = "OneCycleLR",
+        scheduler_cls = "ExponentialLR",
         scheduler_params = {
-            # "pct_start" : 0.2,
-            "max_lr" : lr,
-            "total_steps" : n_epoch,
-            },
-        amp = True # binary_cross_entropy can not support now
+            "gamma" : 0.9,
+        }, 
     )
 
     pipeline = TrainingPipeline(
@@ -668,18 +618,18 @@ if operation == 'train':
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
 
-    with torch.autograd.detect_anomaly():
-        pipeline(
-            train_data=table,
-            # eval_data=table,
-            callbacks=callbacks,
-        )
+    # with torch.autograd.detect_anomaly():
+    #     pipeline(
+    #         train_data=table,
+    #         # eval_data=table,
+    #         callbacks=callbacks,
+    #     )
         
-    # pipeline(
-    #     train_data=table,
-    #     # eval_data=table,
-    #     callbacks=callbacks,
-    # )
+    pipeline(
+        train_data=table,
+        # eval_data=table,
+        callbacks=callbacks,
+    )
 
 elif operation == 'eval':
     
@@ -846,12 +796,13 @@ elif operation == 'eval':
 
     last_training = sorted(os.listdir('./saved_models/power_test/imputated_ce'))[-1]
     model = load_from_folder(model, os.path.join('./saved_models/power_test/imputated_ce', last_training, 'final_model')).to(device)
-    # print(f'model: {model.device}')
+    print(f'model: {model.tau}')
 
     # valid
     from torch.utils.data import DataLoader
 
     model.eval()
+    
     valid_loss = []
     with torch.no_grad():
         for inputs in DataLoader(table, batch_size=1024, num_workers=4, pin_memory=True):
