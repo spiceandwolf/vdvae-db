@@ -38,13 +38,15 @@ class TrainingConfig(BaseConfig):
         n_residual_layers_per_encode_block: 
     """
 
-    output_dir:str = './saved_models/power_test/imputated_ce'
+    output_dir: str = './saved_models/power_test/imputated_ce'
     train_batch_size: int = 1024
     eval_batch_size: int = 1024
     input_bins: Union[Tuple[int, ...], None] = None
     eval_interval_in_epochs: int = 10
     num_epochs: int = 100
-    
+    solution_type: str = 'analytical'
+    rec_loss: str = 'bce'
+    n_iw: int = 1
     
 
 @dataclass
@@ -83,3 +85,4 @@ class DecoderConfig(BaseConfig):
     n_residual_layers_per_decode_block: Union[Tuple[int, ...], None] = None
     output_dim: int = 1024
     input_bins: Union[Tuple[int, ...], None] = None
+    

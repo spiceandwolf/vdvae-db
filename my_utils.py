@@ -40,6 +40,9 @@ def SampleTupleThenRandom(all_cols,
     s = table.iloc[rng.randint(0, table.shape[0])]
     vals = s.values
 
+    # For numerical columns, the predicate was drawn uniformly from {=,≤,≥}.
+    # For categorical columns, we only generated equality predicates.
+    # to be done
     idxs = rng.choice(len(all_cols), replace=False, size=num_filters)
     cols = np.take(all_cols, idxs)
 

@@ -109,20 +109,26 @@ def One_hot(tuples_np):
     return np.concatenate(onehot_datas, 1)
 
 
-def Mask(onehot_data_np, perc_miss, batch_size = 1024):
+def Mask(onehot_data_np, perc_miss, min_mask = 2):
     start_time = time.time()
-    masks = []
-    print(f'start generate masks!')
-    for data in onehot_data_np:
-        mask = np.random.rand(*data.shape) < perc_miss
+    # print(f'start generate masks!')
+    mask = (np.random.rand(*onehot_data_np.shape) < perc_miss).astype(bool)
+    for i in range(onehot_data_np.shape[0]):
+        mask_count = np.sum(mask[i])
         
-        mask[data] = False
+        if mask_count < min_mask:
+            unmasked_indices = np.where(mask[i] == 0)[0]
+            
+            need_to_mask = min_mask - mask_count
+            if len(unmasked_indices) < need_to_mask:
+                mask[i, unmasked_indices] = 1
+                
+            else:
+                to_mask = np.random.choice(unmasked_indices, need_to_mask, replace=False)
+                mask[i, to_mask] = 1
         
-        masks.append(mask)
-        
-        
-    print(f'generate masks time: {time.time() - start_time}s')
-    return np.stack(masks, 0)
+    # print(f'generate masks time: {time.time() - start_time}s')
+    return mask
 
 
 def power():
@@ -145,5 +151,5 @@ if __name__ == '__main__':
         # "data_mask" : table.masks
     }
 
-    with open('./power/data.pkl', 'wb') as f:
+    with open('./power/data_3/4.pkl', 'wb') as f:
         pickle.dump(preprocessed_data, f)

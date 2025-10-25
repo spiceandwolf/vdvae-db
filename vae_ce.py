@@ -1,13 +1,11 @@
 import time
-from matplotlib import pyplot as plt
+
 import numpy as np
 import pandas as pd
 import torch
+
 from pythae.data.datasets import DatasetOutput, BaseDataset
 
-rnd = 2024 # binary_cross_entropy use
-
-np.random.seed(rnd)
 
 class TableDataset(torch.utils.data.Dataset):
     """Wraps a Table and yields each row to use in pythae."""
@@ -140,21 +138,6 @@ input_bins = [c.DistributionSize() for c in original_data.columns]
 # print(input_bins)
 table = TableDataset(original_data)
 
-'''
-print(table[10000]['data'])
-print(table[10000]['data_one_hot'].shape)
-print(table.masks.shape)
-j = 0
-for i in range(len(input_bins)):
-    j += 0 if i == 0 else input_bins[int(i) - 1]
-    print(table[10000]['data_one_hot'][int(table[10000]['data'][i] + j)])
-    print(table[10000]['data_mask'][int(table[10000]['data'][i] + j)])
-    print(table[10000]['data_mask'][0:20])
-    
-print(table[10000]['data_mask'].sum())
-
-assert 0 == 1
-'''
 
 from typing import Tuple, Union
 from pydantic.dataclasses import dataclass
@@ -188,27 +171,6 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 
-
-class ResBlock_FC(nn.Module):
-    def __init__(self, in_channels, middle_channels, out_channels):
-        super(ResBlock_FC, self).__init__()
-        assert out_channels==in_channels 
-        self.linear_layer1 = nn.Sequential(
-                        nn.Linear(in_channels, middle_channels, bias=False),
-                        nn.BatchNorm1d(middle_channels),
-                        nn.ReLU())
-
-        self.linear_layer2 = nn.Sequential(
-                        nn.Linear(middle_channels, out_channels, bias=False),
-                        nn.BatchNorm1d(out_channels),
-                        nn.ReLU())   
-        
-    def forward(self, x):
-        residual = x
-        out1 = self.linear_layer1(x)
-        out2 = self.linear_layer2(out1)
-        out = out2 + residual
-        return out
     
 class Encoder_FC_MissIWAE_Power(BaseEncoder):
     def __init__(self, args):
@@ -561,75 +523,10 @@ model = MissIWAE(
     decoder = decoder
 ).cuda()
 
-from pythae.trainers import BaseTrainerConfig
-from pythae.pipelines import TrainingPipeline
-import os
-
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-torch.manual_seed(rnd)
-
-def linear_warmup(warmup_iters):
-    def f(iteration):
-        return 1.0 if iteration > warmup_iters else iteration / warmup_iters
-    return f
-
-''''''
 operation = 'eval' # train or eval
 
 if operation == 'train':
-    n_epoch = 10
-    lr = 1e-3
-    training_config = BaseTrainerConfig(
-        output_dir = './saved_models/power_test/imputated_ce',
-        learning_rate = lr,
-        per_device_train_batch_size = 1024,
-        per_device_eval_batch_size = 1024,
-        steps_saving = None,
-        num_epochs = n_epoch,
-        train_dataloader_num_workers = 4,
-        eval_dataloader_num_workers = 4,
-        optimizer_cls = "Adam",
-        optimizer_params = {
-            "betas" : (0.99, 0.999),
-            },
-        scheduler_cls = "ExponentialLR",
-        scheduler_params = {
-            "gamma" : 0.9,
-        }, 
-    )
-
-    pipeline = TrainingPipeline(
-        model = model,
-        training_config = training_config
-    )
-
-    from pythae.trainers.training_callbacks import WandbCallback
-
-    callbacks = []
-    wandb_cb = WandbCallback()
-    wandb_cb.setup(
-        training_config = training_config,
-        model_config = model_config,
-        project_name = "vae-ce",
-        entity_name = "spice-neu-edu-cn"
-    )
-    callbacks.append(wandb_cb)
-
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
-
-    # with torch.autograd.detect_anomaly():
-    #     pipeline(
-    #         train_data=table,
-    #         # eval_data=table,
-    #         callbacks=callbacks,
-    #     )
-        
-    pipeline(
-        train_data=table,
-        # eval_data=table,
-        callbacks=callbacks,
-    )
+    pass
 
 elif operation == 'eval':
     

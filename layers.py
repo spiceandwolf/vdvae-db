@@ -1,14 +1,10 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+import wandb
+import wandb.plot
+from latent_layers import get_analytical_distribution
 from utils import ModelOutput
-
-
-@torch.jit.script
-def calculate_z(mean, std):
-    eps = torch.empty_like(mean, device=torch.device('cuda')).normal_(0., 1.)
-    z = eps * std + mean
-    return z
 
 
 class ResBlock_FC(nn.Module):
@@ -68,9 +64,16 @@ class Encode_Block_FC(nn.Module):
     
 
 class Decode_Block_FC(nn.Module):
-    def __init__(self, hidden_dim, latent_dim, activation_dim, n_residual_blocks, next_hidden_dim, n_residual_layers_per_block, generalize_hidden):
+    def __init__(self, args, n_layer, activation_dim, generalize_hidden, latentLayer):
         super(Decode_Block_FC, self).__init__()
         
+        hidden_dim = args.hidden_dim_per_decode_block[n_layer - 1 if generalize_hidden and n_layer != 0 else n_layer]
+        latent_dim = args.latent_dim_per_decode_block[n_layer]
+        n_residual_blocks = args.n_residual_blocks_per_decode_block[n_layer]
+        next_hidden_dim = args.hidden_dim_per_decode_block[n_layer]
+        n_residual_layers_per_block = args.n_residual_layers_per_block[n_layer]
+        
+        self.n_layer = n_layer
         self.generalize_hidden = generalize_hidden
         
         if generalize_hidden:
@@ -84,6 +87,12 @@ class Decode_Block_FC(nn.Module):
             *[ResBlock_FC(hidden_dim, int(hidden_dim / 4), hidden_dim, n_residual_layers_per_block) for _ in range(n_residual_blocks)]
         )
         
+        self.residual_blocks_v2 = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim, bias=False),
+            *[ResBlock_FC(hidden_dim, int(hidden_dim / 4), hidden_dim, n_residual_layers_per_block) for _ in range(n_residual_blocks)],
+            
+        )
+        
         self.prior_net = nn.Sequential(*[
             ResBlock_FC(hidden_dim, int(hidden_dim / 4), hidden_dim, n_residual_layers_per_block),
             nn.Linear(hidden_dim, 2 * hidden_dim, bias=False)
@@ -95,15 +104,9 @@ class Decode_Block_FC(nn.Module):
             nn.Linear(posterior_dim, hidden_dim, bias=False)
         ])
         
-        self.prior_layer = nn.Sequential(*[
-            # ResBlock_FC(hidden_dim, int(hidden_dim / 4), hidden_dim),
-            nn.Linear(hidden_dim, 2 * latent_dim, bias=False),
-        ])
+        self.prior_layer = get_analytical_distribution(latentLayer)(hidden_dim, latent_dim)
         
-        self.posterior_layer = nn.Sequential(*[
-            # ResBlock_FC(hidden_dim, int(hidden_dim / 4), hidden_dim),
-            nn.Linear(hidden_dim, 2 * latent_dim, bias=False),
-        ])
+        self.posterior_layer = get_analytical_distribution(latentLayer)(hidden_dim, latent_dim)
         
         self.z_projection = nn.Sequential(*[
             nn.Linear(latent_dim, hidden_dim, bias=False)
@@ -115,34 +118,29 @@ class Decode_Block_FC(nn.Module):
             y = self.generalize(y)
         
         y_prior_kl = self.prior_net(y)
-        kl_residual, y_prior_kl = torch.chunk(y_prior_kl, chunks=2, dim=1)
+        kl_residual, y_prior_kl = torch.chunk(y_prior_kl, chunks=2, dim=-1)
         
-        y_post = self.posterior_net(torch.cat([y, activation], dim=1))
+        y_post = self.posterior_net(torch.cat([y, activation], dim=-1))
         
         # Prior under expected value of q(z<i|x)
-        prior_kl_stats = self.prior_layer(y_prior_kl)
-        mean, log_var = torch.chunk(prior_kl_stats, chunks=2, dim=1)
-        prior_kl_dist = [mean, log_var]
-        std = torch.exp(0.5 * log_var)
-        
-        z_prior_kl  = calculate_z(mean, std)
+        z_prior, prior_kl_dist = self.prior_layer(y_prior_kl)
         
         # Samples posterior under expected value of q(z<i|x)
-        posterior_kl_stats = self.posterior_layer(y_post)
-        mean, log_var = torch.chunk(posterior_kl_stats, chunks=2, dim=1)
-        posterior_dist = [mean, log_var]
-        std = torch.exp(0.5 * log_var)
-        
-        z_post  = calculate_z(mean, std)
-        
+        z_post, posterior_dist = self.posterior_layer(y_post)
+       
+        if wandb.run is not None:
+            wdb = wandb.run
+            
         # Residual with prior
         y = y + kl_residual
 
         # Project z and merge back into main stream
         z_post = self.z_projection(z_post)
         y = y + z_post
+        # y = torch.cat([y, z_post], dim=1)
 
         # Residual block
         y = self.residual_blocks(y)
+        # y = self.residual_blocks_v2(y)
 
         return y, posterior_dist, prior_kl_dist

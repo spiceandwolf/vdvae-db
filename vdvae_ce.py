@@ -1,7 +1,11 @@
 from torch import nn
 import torch
+import wandb
 from layers import Encode_Block_FC, Decode_Block_FC
 from utils import ModelOutput
+
+
+wdb = None if wandb.run is None else wandb.run
 
 
 class Encoder(nn.Module):
@@ -37,7 +41,7 @@ class Encoder(nn.Module):
             ])
             
         self.input_layer = nn.Linear(args.input_dim, args.hidden_dim_per_encode_block[0], bias=False)
-        self.register_buffer('position_ids', torch.arange(args.input_dim) / args.input_dim)
+        # self.register_buffer('position_ids', torch.arange(args.input_dim) / args.input_dim)
         
     def forward(self, x):
         # x = self.input_layer(x + self.position_ids)
@@ -55,7 +59,7 @@ class Encoder(nn.Module):
     
         
 class Decoder(nn.Module):
-    def __init__(self, args, hidden_dim_per_encode_block):
+    def __init__(self, args, hidden_dim_per_encode_block, latentlayer):
         super(Decoder, self).__init__()
         
         self.trainable_h = torch.nn.Parameter(data=torch.empty(size=(1, args.hidden_dim_per_decode_block[0])), requires_grad=True)                                 
@@ -67,13 +71,11 @@ class Decoder(nn.Module):
         for i, stride in enumerate(args.n_decode_strides):
             self.decode_stride_outputs.extend([
                 Decode_Block_FC(
-                    args.hidden_dim_per_decode_block[i - 1 if stride and i != 0 else i], 
-                    args.latent_dim_per_decode_block[i], 
+                    args, 
+                    i, 
                     hidden_dim_per_encode_block[-2::-1][i], 
-                    args.n_residual_blocks_per_decode_block[i],
-                    args.hidden_dim_per_decode_block[i], 
-                    args.n_residual_layers_per_block[i],
                     stride,
+                    latentlayer,
                 ) 
             ])
             
@@ -81,13 +83,11 @@ class Decoder(nn.Module):
             for j in range(args.n_blocks_after_decode_stride[i]):
                 decode_stride.extend([
                     Decode_Block_FC(
-                        args.hidden_dim_per_decode_block[i], 
-                        args.latent_dim_per_decode_block[i], 
+                        args, 
+                        i, 
                         hidden_dim_per_encode_block[-2::-1][i], 
-                        args.n_residual_blocks_per_decode_block[i],
-                        args.hidden_dim_per_decode_block[i + 1], 
-                        args.n_residual_layers_per_block[i],
                         False,
+                        latentlayer,
                     ),
                 ])
                 
@@ -96,10 +96,11 @@ class Decoder(nn.Module):
         self.output_layer = nn.Sequential(
             nn.LeakyReLU(),
             nn.Linear(args.hidden_dim_per_decode_block[-1], args.output_dim),
+            nn.Sigmoid()
         )
         
     def forward(self, activations):
-        y = torch.tile(self.trainable_h, (activations[0].size()[0], 1,))
+        y = torch.tile(self.trainable_h, (activations[0].size()[0], 1))
         posterior_dist_list = []
         prior_kl_dist_list = []
         
@@ -124,10 +125,10 @@ class Decoder(nn.Module):
         
         
 class MissVDVAE(nn.Module):
-    def __init__(self, encoder_config, decoder_config):
+    def __init__(self, encoder_config, decoder_config, latentlayer):
         super(MissVDVAE, self).__init__()
         self.encoder = Encoder(encoder_config)
-        self.decoder = Decoder(decoder_config, encoder_config.hidden_dim_per_encode_block)
+        self.decoder = Decoder(decoder_config, encoder_config.hidden_dim_per_encode_block, latentlayer)
         
     def forward(self, x):
         activations = self.encoder(x)
