@@ -7,7 +7,7 @@ import os
 import json
 import subprocess
 from hps import Hyperparams, parse_args_and_update_hparams, add_vae_arguments
-from utils import (logger,
+from tested.utils import (logger,
                    local_mpi_rank,
                    mpi_size,
                    maybe_download,

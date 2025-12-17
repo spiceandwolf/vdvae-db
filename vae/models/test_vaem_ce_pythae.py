@@ -5,10 +5,9 @@ from pythae.models.nn import BaseEncoder, BaseDecoder
 from pythae.models.base.base_utils import ModelOutput
 from torch import nn
 
-from data_utils import Mask
 from vae.utils.layers_4_pythae import ResBlock_FC
-from vae.utils.losses import multi_cat_log_likelihood, multi_ce_log_likelihood
-from vae.utils.model_utils import kl_diagnormal_stdnormal_pointwise, sample_z
+from vae.utils.losses import multi_cat_log_likelihood, multi_cat_log_likelihood_pointwise
+from vae.utils.model_utils import kl_diagnormal_stdnormal, kl_diagnormal_stdnormal_pointwise, sample_z
 
 
 class margVAE(nn.Module):
@@ -30,7 +29,6 @@ class margVAE(nn.Module):
     def encode(self, x):
         posterior_dist = self.encoder(x)
         mean, log_var = torch.chunk(posterior_dist, chunks=2, dim=-1)
-        
         std = torch.exp(0.5 * log_var)
         z_x = sample_z(mean, std)
         return z_x, mean, log_var
@@ -38,16 +36,16 @@ class margVAE(nn.Module):
     def decode(self, z):
         return self.decoder(z)
         
-    def forward(self, x, targets, mask):
+    def forward(self, x, targets):
         # qz_x
         z_x, mean, log_var = self.encode(x)
         
         x_z = self.decode(z_x)
         
         kl_loss = kl_diagnormal_stdnormal_pointwise(mean, log_var)
-        nll, _ = multi_cat_log_likelihood(targets, x_z, torch.tensor([x.shape[-1]], device=x.device), mask)
+        nll, _ = multi_cat_log_likelihood_pointwise(targets, x_z, torch.tensor([x.shape[-1]], device=x.device))
 
-        return nll.sum(dim=-1), kl_loss.sum(dim=-1)
+        return nll, kl_loss
     
     
 class Encoder(BaseEncoder):
@@ -56,50 +54,21 @@ class Encoder(BaseEncoder):
         
         hidden_dims = args.hidden_dims
         self.latent_dims = args.latent_dims
-        self.k = args.k
-        self.m = args.m
-        self.marg_input_dims = sum(args.input_bins)
         self.marg_latent_dims = sum(args.input_bins)
         
         self.residual_blocks = nn.Sequential(
             *[ResBlock_FC(hidden_dims, int(hidden_dims // 4), hidden_dims, args.n_residual_layers) for _ in range(args.n_residual_blocks)]
         )
-        
-        self.aug_layer = nn.Sequential(
-            nn.Linear(1 + self.m + 1, self.k),
-            nn.ReLU(inplace=True),
-        )    
+
         self.input_layer = nn.Sequential(
-            nn.Linear(self.k, hidden_dims)
+            nn.Linear(self.marg_latent_dims, hidden_dims)
         )
         self.output_layer = nn.Linear(hidden_dims, args.latent_dims * 2)
-        
-        # no z_bias, because we don't need to predict target
-        self.pnp_F = nn.Parameter(torch.zeros([1, self.marg_input_dims + self.marg_latent_dims, args.m]))
-        nn.init.xavier_uniform_(self.pnp_F)
-        self.pnp_bias = nn.Parameter(torch.zeros([1, self.marg_input_dims + self.marg_latent_dims, 1]))
-        nn.init.xavier_uniform_(self.pnp_bias)
-        
-        self.register_buffer('x', torch.zeros([args.batch_size, self.marg_input_dims]), persistent=False)
-        self.register_buffer('mask', torch.zeros([args.batch_size, self.marg_input_dims]), persistent=False)
+    
         
     def forward(self, marg_zs):
-        x, mask = self.x, self.mask
         
-        input = torch.cat([x, marg_zs], dim=-1).view(-1, 1)
-        pnp_F_flat = self.pnp_F.expand(x.shape[0], -1, -1).reshape(-1, self.m)
-        pnp_bias_flat = self.pnp_bias.expand(x.shape[0], -1, -1).reshape(-1, 1)
-        
-        input_aug = torch.cat([input, input * pnp_F_flat, pnp_bias_flat], dim=1) # [batch_size*(marg_input_dims + marg_latent_dims), 1 + k + 1]
-        # print(f'input_aug: {input_aug[0:1, :]}')
-        input_aug = self.aug_layer(input_aug).view(x.shape[0], -1, self.k)
-        # print(f'input_aug: {input_aug[0:1, :100, 0:1]}')
-        mask = torch.concat([mask, mask], dim=-1)
-        mask = mask.unsqueeze(-1).expand(-1, -1, self.k)
-
-        input_aug = nn.functional.relu(torch.mean(input_aug * mask, dim=1), inplace=True)
-        # print(f'input_aug: {input_aug[0:1, :]}')
-        out = self.input_layer(input_aug)
+        out = self.input_layer(marg_zs)
         out = self.residual_blocks(out)
         out = self.output_layer(out) 
         
@@ -109,10 +78,6 @@ class Encoder(BaseEncoder):
         )
         # print(f'output embedding log_covariance: {output["embedding"][0:1, :100], output["log_covariance"][0:1, :100]}')
         return output
-    
-    def set_buffers(self, x, mask):
-        self.x = x
-        self.mask = mask
 
 
 class Decoder(BaseDecoder):
@@ -155,34 +120,28 @@ class VAEM(VAE):
             margvaes.append(margVAE(input_bin, input_bin, 64))
         self.margvaes = nn.ModuleList(margvaes)
         
-        self.missing_rate = hps.dependencynet.missing_rate
     
     def forward(self, inputs, **kwargs):
 
         targets = inputs["data"]
-        mask = inputs["mask"]
-        # mask[targets] = True
        
         marg_zs, marg_z_means, marg_z_log_vars = self.margvaes_encode(targets.float())
         
-        zs_local, output = self.dependency_forward(targets.float(), marg_zs, mask.float())
+        zs_local, output = self.dependency_forward(targets.float(), marg_zs)
         
         xs_from_dependency = self.margvaes_decode(zs_local)
         
         # loss_stage_2, reconstruction loss, kl loss on z space
-        loss_DNet, reg_loss_DNet = output.loss, output.reg_loss 
+        recon_loss_DNet, reg_loss_DNet = output.recon_loss, output.reg_loss 
         # print(f'recon_loss_DNet: {recon_loss_DNet}, reg_loss_DNet: {reg_loss_DNet}')
-        
         # loss_stage_1
-        # marg_kls = torch.sum(kl_diagnormal_stdnormal_pointwise(marg_z_means, marg_z_log_vars), dim=-1)
-        nlls, _ = multi_ce_log_likelihood(targets, xs_from_dependency, self.input_bins, mask)
-        recon_loss = torch.mean(nlls.sum(dim=-1), dim=0)
-        log_marg_z_given_x = torch.mean(-0.5 * (marg_z_log_vars + (marg_zs - marg_z_means) ** 2 / torch.exp(marg_z_log_vars)).sum(dim=-1), dim=0)
-        reg_loss = log_marg_z_given_x + loss_DNet
+        marg_kls = kl_diagnormal_stdnormal(marg_z_means, marg_z_log_vars)
+        nll, _ = multi_cat_log_likelihood(targets, xs_from_dependency, torch.tensor(self.input_bins, device=targets.device))
         # print(f'nll: {nll / targets.shape[0]}, marg_kls: {marg_kls / targets.shape[0]}')
-        
         # please note that the final loss actually equals to loss_stage_1 + loss_stage_2.
-        loss = recon_loss + log_marg_z_given_x + loss_DNet
+        recon_loss = recon_loss_DNet + nll / targets.shape[0]
+        reg_loss =   reg_loss_DNet + marg_kls / targets.shape[0]
+        loss = output.loss + nll / targets.shape[0] + marg_kls / targets.shape[0]
         
         output = ModelOutput(
             recon_loss=recon_loss,
@@ -194,18 +153,15 @@ class VAEM(VAE):
         
         return output
     
-    def dependency_forward(self, x, marg_zs, mask):
+    def dependency_forward(self, x, marg_zs):
         z_local = {"data": (marg_zs)}
-        self.encoder.set_buffers(x, mask)
         output = super().forward(z_local)
         
-        marg_zs_x = output.recon_x
-        zs_local = marg_zs * mask + marg_zs_x * (1 - mask)
-        # zs_local = marg_zs_x
+        zs_local = output.recon_x
         
         return zs_local, output
         
-    def margvaes_forward(self, x, targets, mask):
+    def margvaes_forward(self, x, targets):
         '''
         training in first stage
         '''
@@ -213,7 +169,7 @@ class VAEM(VAE):
         x_locals = self.margvaes_decode(z_locals)
                 
         kl_loss = kl_diagnormal_stdnormal_pointwise(z_means, z_log_vars)
-        nll, _ = multi_ce_log_likelihood(targets, x_locals, torch.tensor(self.input_bins, device=x.device), mask)
+        nll, _ = multi_cat_log_likelihood_pointwise(targets, x_locals, torch.tensor(self.input_bins, device=x.device))
         
         return nll, kl_loss
     
@@ -248,64 +204,3 @@ class VAEM(VAE):
                 xs_local = torch.cat((xs_local, x_local), dim=1)
                 
         return xs_local
-    
-    def get_imputation(self, x, mask, n=2000):
-        marg_zs, _, _ = self.margvaes_encode(x)
-        zs_local, _ = self.dependency_forward(x, marg_zs, mask.float())
-        xs_from_dependency = self.margvaes_decode(zs_local)
-        _, x_decoded = multi_cat_log_likelihood(x.float(), xs_from_dependency, torch.tensor(self.input_bins, device=x.device))
-        
-        cumsum_dims = np.concatenate(([0],np.cumsum(self.input_bins)))
-        # print(f'xs_from_dependency: {xs_from_dependency.shape}')
-        # print(f'mask: {mask.shape}')
-        # return
-        for d in range(len(self.input_bins)):
-            probe = x_decoded[:, cumsum_dims[d]:cumsum_dims[d+1]] * x[:, cumsum_dims[d]:cumsum_dims[d+1]]
-            # print(f'probe: {probe.sum()}')
-            # break
-            sample = torch.multinomial(probe, n, replacement=True).T
-            # print(f'sample: {sample.shape}')
-            
-            if d == 0:
-                samples = sample
-            else:
-                samples = torch.cat((samples, sample), dim=1)
-                
-        return samples
-    
-    def get_nlls(self, x, mask):
-        marg_zs, marg_z_means, marg_z_log_vars = self.margvaes_encode(x.float())
-    
-        self.encoder.set_buffers(x, mask)
-        
-        encoder_output = self.encoder(marg_zs)
-
-        mu, log_var = encoder_output.embedding, encoder_output.log_covariance
-
-        std = torch.exp(0.5 * log_var)
-        z, eps = super()._sample_gauss(mu, std)
-        marg_zs_x = self.decoder(z)["reconstruction"]
-        
-        loss = recon_loss = (
-                0.5
-                * torch.nn.functional.mse_loss(
-                    marg_zs_x.reshape(x.shape[0], -1),
-                    marg_zs.reshape(x.shape[0], -1),
-                    reduction="none",
-                ).sum(dim=-1)
-            )
-        
-        KLD = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
-        print(f'KLD: {KLD.mean()}, loss: {loss.mean()}')
-        nelbo_p_z = loss + KLD
-        
-        xs_from_dependency = self.margvaes_decode(marg_zs_x)
-        
-        nlls, _ = multi_cat_log_likelihood(x.float(), xs_from_dependency, torch.tensor(self.input_bins, device=x.device))
-        recon_loss = nlls.sum(dim=-1)
-        log_marg_z_given_x = -0.5 * (marg_z_log_vars + (marg_zs - marg_z_means) ** 2 / torch.exp(marg_z_log_vars)).sum(dim=-1)
-        
-        print(f'recon_loss: {recon_loss.mean()}, log_marg_z_given_x: {log_marg_z_given_x.mean()}, nelbo_p_z: {nelbo_p_z.mean()}')
-        loss = recon_loss + log_marg_z_given_x + nelbo_p_z
-        
-        return loss

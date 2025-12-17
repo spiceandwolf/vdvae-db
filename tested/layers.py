@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import wandb
 import wandb.plot
 from latent_layers import get_analytical_distribution
-from utils import ModelOutput
+from tested.utils import ModelOutput
 
 
 class ResBlock_FC(nn.Module):

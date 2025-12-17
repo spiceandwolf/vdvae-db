@@ -329,7 +329,7 @@ class CsvTable(Table):
         
     def _load(self, filename, cols, **kwargs):
 
-        df = pd.read_csv(filename, usecols=cols, **kwargs).sample(frac=1).reset_index(drop=True)
+        df = pd.read_csv(filename, usecols=cols, **kwargs)
         df = df.dropna(axis=0, how='any')
         if cols is not None:
             df = df[cols]

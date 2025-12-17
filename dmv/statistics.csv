@@ -1,0 +1,12 @@
+name,min,max,cardinality,num_unique_values
+Record_Type,BOAT,VEH ,11591877,4
+Registration_Class,AGR,WUG,11591877,75
+State, N,YY,11591877,89
+County,ALBANY      ,YATES       ,11591877,63
+Body_Type,2DSD,W/SR,11591877,59
+Fuel_Type,        ,PROPANE ,11591877,9
+Reg_Valid_Date,19721201,20190401,11591877,2102
+Color,     ,YW/WH,11591877,225
+Scofflaw_Indicator,N,Y,11591877,2
+Suspension_Indicator,N,Y,11591877,2
+Revocation_Indicator,N,Y,11591877,2

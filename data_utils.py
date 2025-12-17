@@ -4,6 +4,7 @@ import time
 import numpy as np
 import pandas as pd
 import torch
+from scipy.stats import bernoulli
 
 import data_tabular
 
@@ -33,11 +34,11 @@ class TableDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         X = self.tuples[idx]
         X_one_hot = self.onehot_data[idx]
-        # mask = self.masks[idx]
+        # mask = Mask(X_one_hot, perc_miss=0.7)
         return {
             "data" : X,
             "data_one_hot" : X_one_hot,
-            # "data_mask" : mask,
+            # "mask" : mask,
         }
         
     def _load_from_pkl(self, pkl_path):
@@ -109,32 +110,30 @@ def One_hot(tuples_np):
     return np.concatenate(onehot_datas, 1)
 
 
-def Mask(onehot_data_np, perc_miss, min_mask = 2):
+def Mask(data, perc_miss):
+    '''
+    This is a mask indicating missingness, 1 = observed, 0 = missing.
+    '''
     start_time = time.time()
     # print(f'start generate masks!')
-    mask = (np.random.rand(*onehot_data_np.shape) < perc_miss).astype(bool)
-    for i in range(onehot_data_np.shape[0]):
-        mask_count = np.sum(mask[i])
         
-        if mask_count < min_mask:
-            unmasked_indices = np.where(mask[i] == 0)[0]
-            
-            need_to_mask = min_mask - mask_count
-            if len(unmasked_indices) < need_to_mask:
-                mask[i, unmasked_indices] = 1
-                
-            else:
-                to_mask = np.random.choice(unmasked_indices, need_to_mask, replace=False)
-                mask[i, to_mask] = 1
+    mask = (torch.rand(data.shape, device=data.device) > perc_miss).float()
+    
+    if mask.sum() == 0:
+        # make sure at least one element is observed
+        rand_idx = torch.randint(0, mask.numel(), (1,), device=data.device)
+        mask.view(-1)[rand_idx] = 1
         
+    mask[data.int()] = True
+
     # print(f'generate masks time: {time.time() - start_time}s')
     return mask
 
 
 def power():
-    csv_file = os.path.join('../dataset/', 'household_power_consumption.txt')
+    csv_file = os.path.join('../dataset/power7/', 'original.csv')
     cols = ['Global_active_power','Global_reactive_power','Voltage','Global_intensity','Sub_metering_1','Sub_metering_2','Sub_metering_3']
-    trX = data_tabular.CsvTable('power', csv_file, cols, sep=';', na_values=[' ', '?'], header=0, dtype=np.float64)  
+    trX = data_tabular.CsvTable('power', csv_file, cols, sep=',', na_values=[' ', '?'], header=0, dtype=np.float64)  
     # print(trX.data.shape)    
 
     return trX
@@ -151,5 +150,5 @@ if __name__ == '__main__':
         # "data_mask" : table.masks
     }
 
-    with open('./power/data_3/4.pkl', 'wb') as f:
+    with open('./power/data.pkl', 'wb') as f:
         pickle.dump(preprocessed_data, f)

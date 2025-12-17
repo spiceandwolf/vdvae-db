@@ -10,14 +10,17 @@ from pythae.trainers.training_callbacks import WandbCallback
 
 import numpy as np
 import torch
+import wandb
 
 from data_utils import TableDataset, power
-from vae.models.vae_ce_pythae import VAE_CE
+from vae.models.pnp_vae_ce_pythae import PnP_VAE_CE
 from vae.utils.model_utils import pythaeDataset
 
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-hps = HParams('.', "hps/hps_pythea_ce", name="pythae_ce")
+os.environ["WANDB_BASE_URL"] = "http://219.216.64.166:8080"
+wandb.login(key="local-e9f9cacf3f04edb41b879b52b51259f5235d21af")
+hps = HParams('.', "hps/hps_pnp_vae_pythea_ce", name="pythae_ce")
 
 
 def create_wandbcallback(training_config, model_config, mode = "online"):
@@ -39,7 +42,7 @@ def get_configs(hps):
     training_config = BaseTrainerConfig(
         output_dir = hps.train.output_dir,
         learning_rate = hps.train.learning_rate,
-        per_device_train_batch_size = hps.train.batch_size,
+        per_device_train_batch_size = hps.train.train_batch_size,
         per_device_eval_batch_size = hps.train.eval_batch_size,
         steps_saving = 5,
         num_epochs = hps.train.num_epochs,
@@ -76,13 +79,13 @@ def main():
     
     hps.train.input_bins = input_bins
     
-    pipeline_cfg, dnet_cfg = get_configs(hps)
+    pipeline_cfg, model_cfg = get_configs(hps)
     
     callbacks = []
-    wandb_cb = create_wandbcallback(pipeline_cfg, dnet_cfg, "offline")
+    wandb_cb = create_wandbcallback(pipeline_cfg, model_cfg)
     callbacks.append(wandb_cb)
     
-    model = VAE_CE(hps, dnet_cfg).cuda()
+    model = PnP_VAE_CE(hps, model_cfg).cuda()
     
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     print('Train step generator trainable params {:.3f} mb.'.format(

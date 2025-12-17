@@ -438,16 +438,16 @@ def ErrorMetric(est_card, card):
 
 
 if __name__ == "__main__":
-    data_root = '~/QOlab/dataset/'
-    table_data = pd.read_csv(os.path.join(data_root, 'household_power_consumption.txt'), delimiter=';', 
-                               usecols=[2,3,4,5,6,7,8], na_values=[' ', '?'])
+    data_root = '~/QOlab/dataset/dmv11/'
+    cols = ['Record_Type','Registration_Class','State','County','Body_Type','Fuel_Type','Reg_Valid_Date','Color','Scofflaw_Indicator','Suspension_Indicator','Revocation_Indicator']
+    table_data = pd.read_csv(os.path.join(data_root, 'original.csv'), usecols=cols, delimiter=',')
     table_data = table_data.dropna(axis=0, how='any')
-    # get_col_statistics(table_data, './power/statistics.csv')
-    result = table_data[table_data['Global_intensity']==1.4]
-    print(result)
-    rng = np.random.RandomState(1234)
-    cols, ops, vals = GenerateQuery(table_data.columns, rng, table_data)
-    print(cols, ops, vals)
+    get_col_statistics(table_data, './dmv/statistics.csv')
+    # result = table_data[table_data['Global_intensity']==1.4]
+    # print(result)
+    # rng = np.random.RandomState(1234)
+    # cols, ops, vals = GenerateQuery(table_data.columns, rng, table_data)
+    # print(cols, ops, vals)
     
-    card = Card(table_data, cols, ops, vals)
-    print(card)
+    # card = Card(table_data, cols, ops, vals)
+    # print(card)

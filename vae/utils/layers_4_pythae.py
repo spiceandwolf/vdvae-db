@@ -8,18 +8,18 @@ class ResBlock_FC(nn.Module):
         
         residual_layers = [
             nn.BatchNorm1d(in_channels),
-            nn.ReLU(),
+            nn.PReLU(),
             nn.Linear(in_channels, middle_channels, bias=False),  
         ]
         
         for _ in range(n_residual_layers_per_block):
-            residual_layers.append(nn.ReLU())
+            residual_layers.append(nn.PReLU())
             residual_layers.append(nn.Linear(middle_channels, middle_channels, bias=False))
             
         residual_layers += [
             nn.BatchNorm1d(middle_channels),
-            nn.ReLU(),
-            nn.Linear(middle_channels, out_channels, bias=False),  
+            nn.PReLU(),
+            nn.Linear(middle_channels, out_channels),  
         ]
         
         self.residual_layers = nn.Sequential(*residual_layers)

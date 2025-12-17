@@ -2,7 +2,7 @@ from torch import nn
 import torch
 import wandb
 from layers import Encode_Block_FC, Decode_Block_FC
-from utils import ModelOutput
+from tested.utils import ModelOutput
 
 
 wdb = None if wandb.run is None else wandb.run

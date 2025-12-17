@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader, RandomSampler
 # from torch.utils.data.distributed import DistributedSampler
 from data_tabular import set_up_data
-from utils import get_cpu_stats_over_ranks
+from tested.utils import get_cpu_stats_over_ranks
 from train_helpers_tabular import set_up_hyperparams, load_vaes, load_opt, accumulate_stats, save_model, update_ema
 from my_utils import Card, ErrorMetric, GenerateQuery, Query, make_points, estimate_probabilities, test_integrate
 from torch.utils.tensorboard import SummaryWriter
