@@ -170,3 +170,4 @@ wandb/
 power/data.pkl
 logs-vdvae_ce/
 logs-vae_ce/
+!saved_models/power_test/imputated_ce/pnpae
