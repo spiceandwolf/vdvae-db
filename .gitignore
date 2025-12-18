@@ -161,7 +161,11 @@ cython_debug/
 
 apex/
 cifar-10-batches-py/
-saved_models/
+saved_models/**
+!saved_models/power_test/
+!saved_models/power_test/imputated_ce/
+!saved_models/power_test/imputated_ce/pnpae
+!saved_models/power_test/imputated_ce/pnpae/**
 runs/
 results/
 treeQuadrature/
@@ -170,4 +174,4 @@ wandb/
 power/data.pkl
 logs-vdvae_ce/
 logs-vae_ce/
-!saved_models/power_test/imputated_ce/pnpae
+
